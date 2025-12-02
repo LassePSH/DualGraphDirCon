@@ -11,8 +11,10 @@ from shapely import geometry, ops
 import shapely
 import momepy
 
-# OUTDATED 
-# see util.py
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# OUTDATED
+# Deprecated. Go to dual_graph_algo/util.py
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 #### avg angel ####
 def get_slope(line):

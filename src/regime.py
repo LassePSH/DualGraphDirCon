@@ -14,8 +14,6 @@ import shutup
 shutup.please()
 from multiprocessing import Pool
 
-
-
 def get_degree_seq(city):
     fp = get_data(city)
     osm = OSM(fp)
