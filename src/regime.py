@@ -14,7 +14,7 @@ import shutup
 shutup.please()
 from multiprocessing import Pool
 
-# OUTDATED
+
 
 def get_degree_seq(city):
     fp = get_data(city)
@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
 
 
-    path = '/work/lpsha/data/regime_v3/'
+    path = '/work/lpsha/data/regime_v3/' # out path
 
     existing = os.listdir(path)
     cities=[c.lower() for c in cities]
