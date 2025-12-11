@@ -6,6 +6,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.ops import linemerge
 import momepy
+import osmnx as ox
 
 
 def get_slope(line):
@@ -15,7 +16,6 @@ def get_slope(line):
         return np.inf
     return (y2 - y1) / (x2 - x1)
 
-    
 def delta_angle(line1, line2): # angle between two lines
     slope1 = get_slope(line1)
     slope2 = get_slope(line2)
@@ -108,7 +108,7 @@ def merged_G_angle(G,tresh,attr):
     merged_H = nx.relabel_nodes(H, mapping)
     
     # Assign merged attributes
-    nx.set_node_attributes(merged_H, length_map, "mm_len")
+    nx.set_node_attributes(merged_H, length_map, "mm_len") # deprecated. length is after merging
     nx.set_node_attributes(merged_H, geom_map, "geometry")
     
     return merged_H, mapping, length_map, geom_map
@@ -122,7 +122,6 @@ def combine(elements):
         elif isinstance(item, list):
             result_list.extend(item)
     return result_list
-
 
 def clean_chains(G_primal):
     while True:
@@ -151,18 +150,19 @@ def clean_chains(G_primal):
 
     return G_primal
 
-
 # main
-def get_dual_dir_con(subG,t_buffer,a_threshold,shape_df):
+def get_dual_dir_con(t_buffer, a_threshold, data):
+    # data can be either a subgraph (osmnx) or a GeoDataFrame (pyrosm)
+    # define angle treshold and buffer
+    # returns the network and the geometry
 
-    # use graph data from the osmnx package
-    if subG != None:
-        shape_df = ox.graph_to_gdfs(subG,nodes=False)
+    if hasattr(data, "nodes"):  # treat as osmnx graph
+        shape_df = ox.graph_to_gdfs(data, nodes=False)
         shape_df.crs = "epsg:4326"
         shape_df = shape_df.to_crs(3857)
-    else: # use shape file from pyrosm
-        # shape_df.crs = "epsg:4326"
-        shape_df = shape_df.to_crs(3857)
+    else:  # treat as GeoDataFrame
+        shape_df['osmid']=shape_df['id'] 
+        shape_df = data.to_crs(3857)
 
     shape_df = shape_df.reset_index().explode('geometry')
     u = shape_df.union_all()
@@ -178,15 +178,13 @@ def get_dual_dir_con(subG,t_buffer,a_threshold,shape_df):
     G_primal = clean_chains(G_primal)
     _, lines = momepy.nx_to_gdf(G_primal)
 
-
     G_dual = momepy.gdf_to_nx(lines , approach='dual', multigraph=False, angles=True)
     G_dual=new_angles(G_dual,touch_buffer=t_buffer)
 
-    angle_thresholds = a_threshold
-
-    H, mapping, length_map, geom_map = merged_G_angle(G_dual,tresh=angle_thresholds,attr='new_angle')
+    H, mapping, length_map, geom_map = merged_G_angle(G_dual,tresh=a_threshold,attr='new_angle')
     df_nodes = pd.DataFrame.from_dict(dict(H.nodes(data=True)), orient='index')
     gdf_merged = gpd.GeoDataFrame(df_nodes, geometry='geometry')
     gdf_merged['degree']=np.array([d for n, d in H.degree()])
+    gdf_merged['length'] = gdf_merged.geometry.length
 
     return gdf_merged, H
