@@ -14,6 +14,8 @@ import shutup
 shutup.please()
 from multiprocessing import Pool
 
+
+# deprecated use new functions 
 def get_degree_seq(city):
     fp = get_data(city)
     osm = OSM(fp)
@@ -58,7 +60,7 @@ if __name__ == '__main__':
             'Phnom Penh', 'Porto', 'Saint Petersburg', 'Salzburg', 'Sarajevo', 'Sofia', 'Tbilisi', 'Tirana', 'Ulaanbaatar',
             'Vilnius', 'Zanzibar City', 'Algiers', 'Antwerp', 'Asunción', 'Bangui', 'Belfast', 'Belgrade', 'Bishkek',
             'Bratislava', 'Bucharest', 'Cape Town', 'Caracas', 'Casablanca', 'Chisinau', 'Dakar', 'Dar es Salaam',
-            'Dhaka', 'Douala', 'Freetown', 'Gaborone', 'Georgetown', 'Harare', 'Havana', 'Helsinki', 'Islamabad',
+            'Dhaka', 'Douala', 'Freetown', 'Gaborone', 'Georgetown', 'Harare', 'Havana', 'Islamabad',
             'Kabul', 'Kampala', 'Kathmandu', 'Kigali', 'Kingston', 'Kolkata', 'Kuwait City', 'Libreville', 'Lilongwe',
             'Ljubljana', 'Lome', 'Luanda', 'Lusaka', 'Maseru', 'Maputo', 'Nassau', 'Niamey', 'Nouakchott',
             'Nukuʻalofa', 'Port-au-Prince', 'Port Louis', 'Port Moresby', 'Port of Spain', 'Port Vila', 'Praia', 'Pristina',
