@@ -37,7 +37,6 @@ def delta_angle(line1, line2): # angle between two lines
 
         return angle_degrees
 
-
 def new_angles(G,touch_buffer):
     nodes = G.nodes(data=True)
     for edges in list(G.edges()):
@@ -73,7 +72,6 @@ def check_string(l,p):
 
 def merged_G_angle(G,tresh,attr):
     H = G.copy() 
-
     # find components that have a similar angle and merge them
     filtered_H = H.copy()
     edges_to_remove = [(u, v) for u, v, a in H.edges(data=True) if (a[attr] > tresh)]  # or (a[attr] > (180 - tresh))
@@ -81,11 +79,9 @@ def merged_G_angle(G,tresh,attr):
 
     # Find connected components (groups of nodes to merge)
     components = [H.subgraph(c).copy() for c in nx.connected_components(filtered_H)]
-    lengths = nx.get_node_attributes(G, "mm_len")
     geometries = nx.get_node_attributes(G, "geometry")
     
     mapping = {}
-    length_map = {}
     geom_map = {}
     
     for comp in components:
@@ -94,9 +90,6 @@ def merged_G_angle(G,tresh,attr):
         # new node id mean node coordinate
         mean_node = tuple(np.mean(np.array(nodes), axis=0))
         mapping.update({n: mean_node for n in nodes})
-        
-        # Sum up lengths # optional
-        length_map[mean_node] = np.sum([lengths.get(n, 0) for n in nodes])
         
         # Merge geometries (LineStrings → MultiLineString → merged line)
         lines = [geometries[n] for n in nodes if n in geometries]
@@ -108,10 +101,9 @@ def merged_G_angle(G,tresh,attr):
     merged_H = nx.relabel_nodes(H, mapping)
     
     # Assign merged attributes
-    nx.set_node_attributes(merged_H, length_map, "mm_len") # deprecated. length is after merging
     nx.set_node_attributes(merged_H, geom_map, "geometry")
     
-    return merged_H, mapping, length_map, geom_map
+    return merged_H
 
 # For cleaning chains
 def combine(elements):
@@ -157,31 +149,38 @@ def get_dual_dir_con(t_buffer, a_threshold, data):
     # returns the network and the geometry
 
     if hasattr(data, "nodes"):  # treat as osmnx graph
+        print('osmnx graph')
         shape_df = ox.graph_to_gdfs(data, nodes=False)
         shape_df.crs = "epsg:4326"
         shape_df = shape_df.to_crs(3857)
     else:  # treat as GeoDataFrame
-        shape_df['osmid']=shape_df['id'] 
+        print('pyrosm GeoDataFrame')
         shape_df = data.to_crs(3857)
+        shape_df['osmid']=shape_df['id'] 
 
+    # explodes the geometry
     shape_df = shape_df.reset_index().explode('geometry')
     u = shape_df.union_all()
     i = u.intersection(u)
     out = gpd.GeoDataFrame(geometry=gpd.GeoSeries(i, crs=shape_df.crs).explode()).reset_index(drop=True)
     shape_exploded_df = out.sjoin(shape_df[['osmid', 'geometry']], how="left", predicate="intersects")
     shape_exploded_df = shape_exploded_df.drop_duplicates(subset=['geometry'])
-
     shape_exploded_df = shape_exploded_df.reset_index(drop=True)
     shape_exploded_df['id'] = shape_exploded_df.index
 
+    # converts to primal graph and merges chains 
     G_primal = momepy.gdf_to_nx(shape_exploded_df, approach="primal")
     G_primal = clean_chains(G_primal)
     _, lines = momepy.nx_to_gdf(G_primal)
 
-    G_dual = momepy.gdf_to_nx(lines , approach='dual', multigraph=False, angles=True)
+    # compute angles 
+    G_dual = momepy.gdf_to_nx(lines , approach='dual', multigraph=False, angles=False)
     G_dual=new_angles(G_dual,touch_buffer=t_buffer)
 
-    H, mapping, length_map, geom_map = merged_G_angle(G_dual,tresh=a_threshold,attr='new_angle')
+    # merges
+    H = merged_G_angle(G_dual,tresh=a_threshold,attr='new_angle')
+
+    # create dataframe
     df_nodes = pd.DataFrame.from_dict(dict(H.nodes(data=True)), orient='index')
     gdf_merged = gpd.GeoDataFrame(df_nodes, geometry='geometry')
     gdf_merged['degree']=np.array([d for n, d in H.degree()])
