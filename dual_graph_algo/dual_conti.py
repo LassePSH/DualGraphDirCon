@@ -9,53 +9,39 @@ import momepy
 import osmnx as ox
 
 
-def get_slope(line):
-    l = len(line.xy[0])-1
-    x1, y1, x2, y2 = line.xy[0][0], line.xy[1][0], line.xy[0][l], line.xy[1][l]
-    if x2 == x1: # straight vertical line
-        return np.inf
-    return (y2 - y1) / (x2 - x1)
+def direction(line):
+    x, y = line.xy
+    return np.array([x[-1] - x[0], y[-1] - y[0]])
 
-def delta_angle(line1, line2): # angle between two lines
-    slope1 = get_slope(line1)
-    slope2 = get_slope(line2)
+def delta_angle(line1, line2):
+    v1 = direction(line1)
+    v2 = direction(line2)
 
-    if slope1 == np.inf and slope2 == np.inf:
-        return 0
+    dot = np.dot(v1, v2)
+    norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+
+    if norm == 0: # avoids division by zero
+        return 0.0
     
-    elif slope1 == np.inf:
-        return 90-math.degrees(abs(math.atan(slope2)))
-
-    elif slope2 == np.inf:
-        return 90-math.degrees(abs(math.atan(slope1)))
-    
-    elif slope1 * slope2 == -1:
-        return 90
-
-    else:
-        angle_degrees = math.degrees(math.atan(abs((slope2 - slope1) / (1 + slope1 * slope2))))
-
-        return angle_degrees
+    # acute angle 0-90
+    cos_theta = np.clip(dot / norm, -1.0, 1.0)
+    return math.degrees(math.acos(abs(cos_theta)))
 
 def new_angles(G,touch_buffer):
-    nodes = G.nodes(data=True)
-    for edges in list(G.edges()):
-        u, v = edges
-        a =  nodes[u]['geometry']
-        b =  nodes[v]['geometry']
+    for u, v in G.edges():
+        a = G.nodes[u]['geometry']
+        b = G.nodes[v]['geometry']
         touch_point = a.intersection(b)
         
-        # if the touching point is not single point. Eg. Parallel lines
-        if type(touch_point)!=Point: 
-            angle=delta_angle(a,b)
-        else: 
-            # include inf/non buffer zone
+        if isinstance(touch_point, Point):
             touch_point_b=touch_point.buffer(touch_buffer)
             cut_a = a.difference(a.difference(touch_point_b)) 
             cut_b = b.difference(b.difference(touch_point_b))
             cut_b = check_string(cut_b,touch_point)
             cut_a = check_string(cut_a,touch_point)
             angle = delta_angle(cut_a, cut_b)
+        else: # not a point (e.g parralel lines)
+            angle = delta_angle(a, b)
         
         G[u][v]['new_angle'] = angle
     
@@ -70,16 +56,16 @@ def check_string(l,p):
         return l
 
 
-def merged_G_angle(G,tresh,attr):
-    H = G.copy() 
+def merged_G_angle(H,thresh,attr): # fix variable names..
     # find components that have a similar angle and merge them
     filtered_H = H.copy()
-    edges_to_remove = [(u, v) for u, v, a in H.edges(data=True) if (a[attr] > tresh)]  # or (a[attr] > (180 - tresh))
+    edges_to_remove = [(u, v) for u, v, a in H.edges(data=True) if (a[attr] > thresh)]  
+    # (a[attr] > (180 - tresh)) for non acute angles
     filtered_H.remove_edges_from(edges_to_remove)
 
     # Find connected components (groups of nodes to merge)
     components = [H.subgraph(c).copy() for c in nx.connected_components(filtered_H)]
-    geometries = nx.get_node_attributes(G, "geometry")
+    geometries = nx.get_node_attributes(H, "geometry")
     
     mapping = {}
     geom_map = {}
@@ -105,6 +91,7 @@ def merged_G_angle(G,tresh,attr):
     
     return merged_H
 
+
 # For cleaning chains
 def combine(elements):
     result_list = []
@@ -115,25 +102,27 @@ def combine(elements):
             result_list.extend(item)
     return result_list
 
+
 def clean_chains(G_primal):
     while True:
         nodes_to_remove = []
         
-        for node in G_primal.nodes():
+        for node in list(G_primal.nodes()):
             neighbors = list(G_primal.neighbors(node))
-            degree = G_primal.degree(node)
-            if len(neighbors) == 2 and degree == 2:
-
-                my_id = combine([i[2]['id'] for i in list(G_primal.edges(node, data=True))])
-                lines = [i[2]['geometry'] for i in list(G_primal.edges(node, data=True))]
-
+            # len(neihbors) is somehow not redundant?
+            if G_primal.degree(node) == 2 and len(neighbors) == 2: 
+            
+                # merge lines and ids
+                edge_data_list = list(G_primal.edges(node, data=True))
+                my_id = combine([i[2]['id'] for i in edge_data_list])
+                lines = [i[2]['geometry'] for i in edge_data_list]
                 multi_line = linemerge(MultiLineString(lines))
 
+                # add new edge and remove node
                 G_primal.add_edge(neighbors[1], neighbors[0], 
                                 id=my_id,
                                 geometry=multi_line,
                                 new_edge=True)
-
                 nodes_to_remove.append(node)
                 
         if not nodes_to_remove: # if empty
@@ -178,7 +167,7 @@ def get_dual_dir_con(t_buffer, a_threshold, data):
     G_dual=new_angles(G_dual,touch_buffer=t_buffer)
 
     # merges
-    H = merged_G_angle(G_dual,tresh=a_threshold,attr='new_angle')
+    H = merged_G_angle(G_dual,thresh=a_threshold,attr='new_angle')
 
     # create dataframe
     df_nodes = pd.DataFrame.from_dict(dict(H.nodes(data=True)), orient='index')
