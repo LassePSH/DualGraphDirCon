@@ -160,9 +160,10 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2): #enforce_deg
 
     if hasattr(data, "nodes"):  # treat as osmnx graph
         print('osmnx graph')
-        shape_df = ox.graph_to_gdfs(data, nodes=False)
+        shape_df = ox.graph_to_gdfs(ox.convert.to_undirected(data), nodes=False)
         shape_df.crs = "epsg:4326"
         shape_df = shape_df.to_crs(3857)
+        shape_df = momepy.roundabout_simplification(shape_df)
     else:  # treat as GeoDataFrame
         print('using pyrosm GeoDataFrame')
         print('WARNING pyrosm does work not that well?')
