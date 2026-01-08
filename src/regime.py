@@ -15,7 +15,7 @@ shutup.please()
 from multiprocessing import Pool
 
 
-# deprecated use new functions 
+# deprecated use new functions !!!!
 def get_degree_seq(city):
     fp = get_data(city)
     osm = OSM(fp)

@@ -165,7 +165,7 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2): #enforce_deg
         shape_df = shape_df.to_crs(3857)
     else:  # treat as GeoDataFrame
         print('using pyrosm GeoDataFrame')
-        print('WARNING pyrosm does not that well?')
+        print('WARNING pyrosm does work not that well?')
         shape_df = data.to_crs(3857)
         if 'osmid' not in shape_df.columns:
             shape_df['osmid'] = shape_df['id']
