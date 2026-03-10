@@ -209,8 +209,9 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2):
         print('roundabout simplification applied')
     except Exception as e:
         print(f'roundabout simplification failed: {e}')
-        if 'edgeUID' not in shape_df.columns:
-            shape_df['edgeUID'] = shape_df.index
+        
+    if 'edgeUID' not in shape_df.columns:
+        shape_df['edgeUID'] = shape_df.index
 
     # explodes the geometry
     shape_df = shape_df.reset_index().explode('geometry')
