@@ -203,7 +203,7 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2):
 
     shape_df = ox.graph_to_gdfs(ox.convert.to_undirected(data), nodes=False)
     shape_df.crs = "epsg:4326"
-    shape_df = shape_df.to_crs(3857)
+    shape_df = shape_df.to_crs(shape_df.estimate_utm_crs())
     try:
         shape_df = momepy.roundabout_simplification(shape_df)
         print('roundabout simplification applied')

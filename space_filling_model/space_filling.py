@@ -313,7 +313,7 @@ def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
         eligible_mask = lengths > min_length
 
         # Model 2: vectorised area constraint
-        if (model == 2):
+        if model == 2:
             mids = (sa[:, 0] + sa[:, 1]) * 0.5
             r = np.hypot(mids[:, 0] - CENTER[0], mids[:, 1] - CENTER[1])
             with np.errstate(divide='ignore', invalid='ignore'):

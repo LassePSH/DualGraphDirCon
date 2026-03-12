@@ -1,0 +1,100 @@
+London, England, UK
+Copenhagen, Denmark
+Berlin, Germany
+Aarhus, Denmark
+Barcelona, Spain
+Boston, Massachusetts, USA
+San Francisco, California, USA
+Tokyo, Japan
+Paris, France
+Rome, Italy
+New York City, New York, USA
+Sydney, Australia
+Moscow, Russia
+Amsterdam, Netherlands
+Prague, Czechia
+Cairo, Egypt
+Bangkok, Thailand
+Dubai, United Arab Emirates
+Mumbai, India
+Rio de Janeiro, Brazil
+Toronto, Canada
+Los Angeles, California, USA
+Singapore
+Hong Kong, China
+Seoul, South Korea
+Shanghai, China
+Cape Town, South Africa
+Buenos Aires, Argentina
+Vienna, Austria
+Florence, Italy
+Dublin, Ireland
+Madrid, Spain
+Athens, Greece
+Stockholm, Sweden
+Lisbon, Portugal
+Hanoi, Vietnam
+Kuala Lumpur, Malaysia
+Oslo, Norway
+Warsaw, Poland
+Brussels, Belgium
+Budapest, Hungary
+Edinburgh, Scotland, UK
+Helsinki, Finland
+Istanbul, Turkey
+Kyoto, Japan
+Manila, Philippines
+Montreal, Canada
+Nairobi, Kenya
+Ottawa, Canada
+Panama City, Panama
+Perth, Australia
+Reykjavik, Iceland
+Santiago, Chile
+Vancouver, Canada
+Wellington, New Zealand
+Zurich, Switzerland
+Abu Dhabi, United Arab Emirates
+Beijing, China
+Brasília, Brazil
+Brisbane, Australia
+Doha, Qatar
+Frankfurt, Germany
+Geneva, Switzerland
+Guangzhou, China
+Hamburg, Germany
+Jakarta, Indonesia
+Kiev, Ukraine
+Lima, Peru
+Luxembourg City, Luxembourg
+Mexico City, Mexico
+Monaco
+Naples, Italy
+Nice, France
+Puerto Vallarta, Mexico
+San Diego, California, USA
+San Jose, California, USA
+San Juan, Puerto Rico
+Santa Barbara, California, USA
+São Paulo, Brazil
+Split, Croatia
+St. Petersburg, Russia
+Tallinn, Estonia
+Valletta, Malta
+Venice, Italy
+Victoria, Canada
+Washington, D.C., USA
+Winnipeg, Canada
+Yangon, Myanmar
+Yerevan, Armenia
+Zagreb, Croatia
+Palermo, Italy
+Palma de Mallorca, Spain
+Phnom Penh, Cambodia
+Porto, Portugal
+Salzburg, Austria
+Sarajevo, Bosnia and Herzegovina
+Sofia, Bulgaria
+Tbilisi, Georgia
+Tirana, Albania
+Ulaanbaatar, Mongolia
