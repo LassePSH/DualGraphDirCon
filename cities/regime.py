@@ -44,6 +44,7 @@ if __name__ == '__main__':
     print("Number of cities:", len(cities))
 
     path = f'/home/lpsha/s154446/fractality/data/city_degrees/t{int(t_buffer)}_a{int(a_threshold)}/'
+    os.makedirs(path, exist_ok=True)
 
     with Pool(20) as p:
         p.map(parallel, cities)

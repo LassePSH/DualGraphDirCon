@@ -16,18 +16,17 @@ def direction(line):
     return x[-1] - x[0], y[-1] - y[0]
 
 def delta_angle(line1, line2):
-    """Acute angle (0–90°) between two LineStrings."""
-    x1, y1 = direction(line1)
-    x2, y2 = direction(line2)
+    v1 = direction(line1)
+    v2 = direction(line2)
 
-    dot = x1*x2 + y1*y2
-    norm = math.sqrt((x1*x1 + y1*y1) * (x2*x2 + y2*y2))
+    dot = np.dot(v1, v2)
+    norm = np.linalg.norm(v1) * np.linalg.norm(v2)
 
     if norm == 0: # avoids division by zero
         return 0.0
 
     # acute angle 0-90
-    cos_theta = max(-1.0, min(1.0, dot / norm))
+    cos_theta = np.clip(dot / norm, -1.0, 1.0)
     return math.degrees(math.acos(abs(cos_theta)))
 
 def new_angles(G, touch_buffer):
@@ -122,10 +121,7 @@ def split_until_degree_2(G, attr):
                 if G.has_edge(u, v):
                     G.remove_edge(u, v)
                     changed = True
-
     return [G.subgraph(c).copy() for c in nx.connected_components(G)]
-
-
 
 
 def merged_G_angle(H, thresh, attr, enforce_degree2):
@@ -175,20 +171,20 @@ def merged_G_angle(H, thresh, attr, enforce_degree2):
             uid_map[mean_node] = uids
 
     merged_H = nx.relabel_nodes(H, mapping)
+    merged_H.remove_edges_from(nx.selfloop_edges(merged_H))  # add this
     nx.set_node_attributes(merged_H, geom_map, "geometry")
     nx.set_node_attributes(merged_H, uid_map, "edgeUID")
 
     return merged_H
 
-
-
-def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2):
+def get_dual_dir_con(t_buffer, a_threshold, data, simplify_roundabout, enforce_degree2):
     """Build the dual continuity graph from an osmnx graph.
 
     Args:
         t_buffer: buffer radius (meters) around touch points for local angle computation.
         a_threshold: max angle (degrees) for two streets to be considered continuous.
         data: osmnx graph.
+        simplify_roundabout: if True, simplify roundabout with momepy/coins
         enforce_degree2: if True, split merged components so no node exceeds degree 2.
 
     Returns:
@@ -202,13 +198,17 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2):
         raise TypeError("data must be an osmnx graph")
 
     shape_df = ox.graph_to_gdfs(ox.convert.to_undirected(data), nodes=False)
-    shape_df.crs = "epsg:4326"
+    # shape_df.crs = "epsg:4326" old version, new version below
+    shape_df = shape_df.set_crs("epsg:4326")
     shape_df = shape_df.to_crs(shape_df.estimate_utm_crs())
-    try:
-        shape_df = momepy.roundabout_simplification(shape_df)
-        print('roundabout simplification applied')
-    except Exception as e:
-        print(f'roundabout simplification failed: {e}')
+    
+    if simplify_roundabout:
+        try:
+            shape_df = momepy.roundabout_simplification(shape_df)
+            # print('roundabout simplification applied')
+        except Exception as e:
+            None # assuming there are no roundabouts
+            # print(f'roundabout simplification failed: {e}')
         
     if 'edgeUID' not in shape_df.columns:
         shape_df['edgeUID'] = shape_df.index
@@ -231,7 +231,7 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2):
 
     # compute angles 
     G_dual = momepy.gdf_to_nx(lines , approach='dual', multigraph=False, angles=False)
-    G_dual = new_angles(G_dual,touch_buffer=t_buffer)
+    G_dual = new_angles(G_dual,touch_buffer=t_buffer) 
 
     # merges
     H = merged_G_angle(G_dual,thresh=a_threshold,attr='new_angle',enforce_degree2=enforce_degree2)
@@ -239,7 +239,10 @@ def get_dual_dir_con(t_buffer, a_threshold, data, enforce_degree2):
     # create dataframe
     df_nodes = pd.DataFrame.from_dict(dict(H.nodes(data=True)), orient='index')
     gdf_merged = gpd.GeoDataFrame(df_nodes, geometry='geometry')
-    gdf_merged['degree']=np.array([d for n, d in H.degree()])
+    
+    # gdf_merged['degree']=np.array([d for n, d in H.degree()]) # old version, new version below
+    degree_map = dict(H.degree())
+    gdf_merged['degree'] = gdf_merged.index.map(degree_map)
     gdf_merged['degree_log'] = gdf_merged.degree.apply(lambda x: np.log10(x) if x > 0 else 0)
     gdf_merged['length'] = gdf_merged.geometry.length
 
