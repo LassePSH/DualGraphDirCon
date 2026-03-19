@@ -59,6 +59,26 @@ segs = run_model(model=2, seed=42, min_angle=np.pi/4)
 - **Model 1 (basic):** Select segment proportional to length, split at midpoint, connect to nearest visible intersection
 - **Model 2 (biased):** Same as Model 1 with constraints: polygon area `A(r) > 0.05 * exp(-1/r)` and all intersection angles > π/4
 
+### Sierpinski Carpet Model
+
+Apply the DGDC algorithm to a synthetic fractal street network generated from the Sierpinski carpet:
+
+```python
+from sierpinski_carpet_model.sierpinski_carpet import run_dgdc_on_carpet, get_carpet_geodataframe
+
+# Get carpet geometry as a GeoDataFrame (level k → 8^k surviving cells)
+gdf = get_carpet_geodataframe(level=3)
+
+# Run dual-graph analysis on the carpet network
+gdf_carpet, gdf_merged, H = run_dgdc_on_carpet(level=3, a_threshold=20)
+```
+
+Or run directly to save results as GeoPackages:
+
+```bash
+python sierpinski_carpet_model/sierpinski_carpet.py
+```
+
 ### City-Scale Analysis
 
 Compute dual graph degree sequences for ~84 cities in parallel:
@@ -72,16 +92,18 @@ Results are saved to `data/city_degrees/t10_a20/<city>.out`.
 ## Project Structure
 
 ```
-dgdc/               # Core DGDC package
-  dual_conti.py     # Main algorithm
+dgdc/                        # Core DGDC package
+  dual_conti.py              # Main algorithm
   __init__.py
 space_filling_model/
-  space_filling.py  # Generative street model
+  space_filling.py           # Generative street model
+sierpinski_carpet_model/
+  sierpinski_carpet.py       # Sierpinski carpet network + DGDC analysis
 cities/
-  regime.py         # Batch city analysis (84 cities, 20 parallel processes)
-  cities.txt        # List of cities
-notebooks_lasse/    # Exploratory Jupyter notebooks
-data/               # Output data
+  regime.py                  # Batch city analysis (84 cities, 20 parallel processes)
+  cities.txt                 # List of cities
+notebooks_lasse/             # Exploratory Jupyter notebooks
+data/                        # Output data
 ```
 
 ## Dependencies
