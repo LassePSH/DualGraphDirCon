@@ -25,7 +25,7 @@ Requires Python ≥ 3.9.
 import osmnx as ox
 from dgdc import get_dual_dir_con
 
-G = ox.graph_from_place("Amsterdam, Netherlands", network_type="drive")
+G = ox.graph_from_place("Amsterdam, Netherlands", network_type="all")
 
 gdf_merged, H, shape_exploded_df, lines = get_dual_dir_con(
     t_buffer=10,       # buffer radius (m) around intersection touch points
