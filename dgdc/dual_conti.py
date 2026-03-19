@@ -200,7 +200,8 @@ def get_dual_dir_con(t_buffer, a_threshold, data, simplify_roundabout, enforce_d
     shape_df = ox.graph_to_gdfs(ox.convert.to_undirected(data), nodes=False)
     # shape_df.crs = "epsg:4326" old version, new version below
     shape_df = shape_df.set_crs("epsg:4326")
-    shape_df = shape_df.to_crs(shape_df.estimate_utm_crs())
+    estimated_crs = shape_df.estimate_utm_crs()
+    shape_df = shape_df.to_crs(estimated_crs)
     
     if simplify_roundabout:
         try:
@@ -245,5 +246,6 @@ def get_dual_dir_con(t_buffer, a_threshold, data, simplify_roundabout, enforce_d
     gdf_merged['degree'] = gdf_merged.index.map(degree_map)
     gdf_merged['degree_log'] = gdf_merged.degree.apply(lambda x: np.log10(x) if x > 0 else 0)
     gdf_merged['length'] = gdf_merged.geometry.length
+    gdf_merged.crs = estimated_crs
 
     return gdf_merged, H, shape_exploded_df, lines

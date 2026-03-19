@@ -1,4 +1,4 @@
-# fractality
+# Dual Graphs with direction continuity
 
 Street network morphology research project studying urban street patterns through dual graph continuity analysis and generative space-filling models.
 
