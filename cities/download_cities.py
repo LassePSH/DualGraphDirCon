@@ -3,9 +3,31 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import osmnx as ox
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import box
 from multiprocessing import Pool
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'city_graphs')
+
+COPENHAGEN_MUNICIPALITIES = [
+    "Albertslund", "Ballerup", "Brøndby", "Dragør", "Frederiksberg",
+    "Furesø", "Gentofte", "Gladsaxe", "Glostrup", "Greve",
+    "Herlev", "Hvidovre", "Høje-Taastrup", "Ishøj", "Københavns",
+    "Lyngby-Taarbæk", "Rudersdal", "Rødovre", "Tårnby", "Vallensbæk",
+]
+
+
+def _download_copenhagen():
+    gdfs = []
+    for name in COPENHAGEN_MUNICIPALITIES:
+        try:
+            gdfs.append(ox.geocode_to_gdf(f"{name} Kommune, Denmark"))
+        except Exception as e:
+            print(f'  Copenhagen: failed to fetch {name}: {e}')
+    combined = gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True))
+    minx, miny, maxx, maxy = combined.geometry.union_all().bounds
+    return ox.graph.graph_from_polygon(box(minx, miny, maxx, maxy))
 
 
 def city_cache_path(city):
@@ -19,7 +41,10 @@ def download_city(city):
         print(f'{city} already cached, skipping')
         return
     try:
-        G = ox.graph.graph_from_place(city)
+        if city.strip().lower().startswith('copenhagen'):
+            G = _download_copenhagen()
+        else:
+            G = ox.graph.graph_from_place(city)
         ox.save_graphml(G, path)
         print(f'{city} downloaded and saved')
     except Exception as e:

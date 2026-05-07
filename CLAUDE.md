@@ -17,6 +17,18 @@ python cities/regime.py
 
 # Run space-filling model (generates model1.shp and model2.shp)
 cd space_filling_model && python space_filling.py
+
+# Pre-download OSM graphs to data/city_graphs/ (cached as .graphml)
+python cities/download_cities.py
+
+# Grid search over (t_buffer, a_threshold); writes .npz of degree/length arrays
+python cities/regime_grid_search.py
+
+# Sierpinski carpet street network + DGDC analysis (writes GeoPackages)
+python sierpinski_carpet_model/sierpinski_carpet.py
+
+# Per-intersection street angles for each cached city (writes data/city_angles/<city>.out)
+python city_angles/compute_angles.py --t_buffer 50 --processes 20
 ```
 
 No automated test suite or linter is configured. Research is done via Jupyter notebooks in `notebooks_lasse/`.
@@ -59,9 +71,31 @@ segs = run_model(model=2, seed=42, min_angle=np.pi/4)
 gdf = get_geodataframe(model=1, seed=42)
 ```
 
-### `cities/regime.py` — City Analysis
+### `sierpinski_carpet_model/sierpinski_carpet.py` — Synthetic Fractal Network
 
-Fetches ~84 city street networks via `osmnx`, computes dual graph degree sequences in parallel (20 processes), saves results to `data/city_degrees/t10_a20/<city>.out`.
+Builds a Sierpinski carpet street network (recursive 3×3 subdivision with centre-cell removal; 8^k surviving cells at level `k`) and runs DGDC on it as a ground-truth fractal benchmark.
+
+```python
+from sierpinski_carpet_model.sierpinski_carpet import run_dgdc_on_carpet, get_carpet_geodataframe
+gdf = get_carpet_geodataframe(level=3)
+gdf_carpet, gdf_merged, H = run_dgdc_on_carpet(level=3, a_threshold=20)
+```
+
+### `cities/` — City-Scale Analysis
+
+- `cities.txt` — list of ~84 target cities.
+- `get_city_list.py` — helper for building/refreshing the target-city list.
+- `download_cities.py` — pre-fetches OSM graphs via `osmnx` and caches them as `data/city_graphs/<city>.graphml` (use `load_city(city)` to read back).
+- `regime.py` — runs DGDC on all cached cities in parallel (20 processes) at fixed `(t_buffer=10, a_threshold=20)`; writes `data/city_degrees/t10_a20/<city>.out`.
+- `regime_grid_search.py` — sweeps `(t_buffer, a_threshold)` combinations and writes `.npz` files containing degree and length arrays per city.
+
+### `city_angles/compute_angles.py` — Per-Intersection Angle Dump
+
+Re-runs the DGDC pipeline up to `new_angles` for every cached `data/city_graphs/<city>.graphml`, then writes the flat list of dual-graph edge angles (acute, 0–90°) to `data/city_angles/<city>.out` via `np.savetxt`. Runs in a `multiprocessing.Pool` (default 20 procs); existing outputs are skipped.
+
+### Output directories
+
+`data/city_graphs/` holds cached `.graphml` OSM graphs; `data/city_degrees/` holds DGDC degree-sequence outputs from `regime.py`; `data/city_angles/` holds per-edge angle arrays from `city_angles/compute_angles.py`; `data/city_external/` and `data/traj/` hold additional city-level data. `cache/` holds JSON osmnx HTTP response cache. `city_orientation/` is currently empty (scaffolded for future work).
 
 ## Key Dependencies
 

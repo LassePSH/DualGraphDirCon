@@ -5,13 +5,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from dgdc import get_dual_dir_con
 import numpy as np
 from multiprocessing import Pool
-import osmnx as ox
 import argparse
 import os
+from download_cities import load_city
 
 
 def get_degree_seq(city, t_buffer, a_threshold):
-    G = ox.graph.graph_from_place(city)
+    G = load_city(city)
     gdf_merged, _, _, _ = get_dual_dir_con(t_buffer=t_buffer, a_threshold=a_threshold, data=G, enforce_degree2=False)
     degree_sequence = np.array(gdf_merged.degree)
     return degree_sequence
