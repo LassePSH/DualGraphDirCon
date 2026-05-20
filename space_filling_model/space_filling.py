@@ -2,415 +2,329 @@
 """
 Space-filling street network model.
 
-Recreates the two models described in the urban street pattern paper:
+Model 1 (basic): pick a segment with probability proportional to length, split
+  at midpoint, connect midpoint to the closest visible intersection.
 
-Model 1 (basic): At each step, pick a segment proportional to length, split at
-  midpoint, connect midpoint to the closest visible intersection.
-
-Model 2 (biased): Same as Model 1 but enforces:
-  - Polygon area constraint: A(r) > 0.05 * exp(-1/r), larger blocks near periphery
-  - Angle constraint: all angles at intersections must be > pi/4
+Model 2 (biased): same as Model 1 but only splits segments whose half-length²
+  exceeds area_coeff·exp(-area_scale/r) (larger blocks near the periphery), and
+  rejects connections that would create an intersection angle below min_angle.
 
 Both start from a unit square divided by 4 lines (horizontal, vertical, two
-diagonals) all crossing at the centre.
+diagonals) crossing at the centre.
 
-Requires: numpy, shapely, geopandas
+Performance: the hot inner loops (visibility, angle check) are JIT-compiled
+with numba when available; otherwise pure-numpy fallbacks are used. Use
+`run_ensemble` to run many seeds in parallel.
+
+Requires: numpy, scipy, shapely, geopandas. Optional: numba.
 """
 
-import numpy as np
-from shapely.geometry import LineString
+from __future__ import annotations
+
+import os
 from collections import defaultdict
-from scipy.spatial import cKDTree
+from multiprocessing import Pool
+
 import geopandas as gpd
+import numpy as np
+from scipy.spatial import cKDTree
+from shapely.geometry import LineString
+
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    def njit(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return lambda f: f
+
+MIN_LENGTH = 0.05
+CENTER_X, CENTER_Y = 0.5, 0.5
+EPS = 1e-9
+
 
 # --------------------------------------------------------------------------- #
-# Parameters                                                                    #
+# Hot inner loops (JIT-compiled when numba is available)                      #
 # --------------------------------------------------------------------------- #
 
-MIN_LENGTH = 0.05       # Minimum segment length; stop when nothing is longer
-CENTER     = (0.5, 0.5) # Centre of the unit square
-EPS        = 1e-9       # Floating-point tolerance
+@njit(cache=True)
+def _segment_blocks(px, py, qx, qy, seg_arr):
+    """True if any segment in seg_arr properly crosses p→q.
 
-# --------------------------------------------------------------------------- #
-# Geometry helpers                                                            #
-# --------------------------------------------------------------------------- #
+    Segments sharing an endpoint with p or q are treated as non-blocking.
+    """
+    for i in range(seg_arr.shape[0]):
+        ax = seg_arr[i, 0, 0]; ay = seg_arr[i, 0, 1]
+        bx = seg_arr[i, 1, 0]; by = seg_arr[i, 1, 1]
+        if (abs(ax - px) < EPS and abs(ay - py) < EPS) or \
+           (abs(bx - px) < EPS and abs(by - py) < EPS) or \
+           (abs(ax - qx) < EPS and abs(ay - qy) < EPS) or \
+           (abs(bx - qx) < EPS and abs(by - qy) < EPS):
+            continue
+        d1 = (qx - px) * (ay - py) - (qy - py) * (ax - px)
+        d2 = (qx - px) * (by - py) - (qy - py) * (bx - px)
+        d3 = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+        d4 = (bx - ax) * (qy - ay) - (by - ay) * (qx - ax)
+        if d1 * d2 < 0.0 and d3 * d4 < 0.0:
+            return True
+    return False
 
-def dist(p1, p2):
-    return np.hypot(p1[0] - p2[0], p1[1] - p2[1])
+
+@njit(cache=True)
+def _min_incident_angle(nx_, ny_, vx, vy, seg_arr):
+    """Min angle (radians) between vector (vx,vy) and edges incident to node."""
+    nv_norm = np.sqrt(vx * vx + vy * vy)
+    if nv_norm < EPS:
+        return np.pi
+    best = np.pi
+    for i in range(seg_arr.shape[0]):
+        ax = seg_arr[i, 0, 0]; ay = seg_arr[i, 0, 1]
+        bx = seg_arr[i, 1, 0]; by = seg_arr[i, 1, 1]
+        if abs(ax - nx_) < EPS and abs(ay - ny_) < EPS:
+            ox, oy = bx, by
+        elif abs(bx - nx_) < EPS and abs(by - ny_) < EPS:
+            ox, oy = ax, ay
+        else:
+            continue
+        evx = ox - nx_; evy = oy - ny_
+        ev_norm = np.sqrt(evx * evx + evy * evy)
+        if ev_norm < EPS:
+            continue
+        cos_a = (vx * evx + vy * evy) / (nv_norm * ev_norm)
+        if cos_a > 1.0:
+            cos_a = 1.0
+        elif cos_a < -1.0:
+            cos_a = -1.0
+        ang = np.arccos(cos_a)
+        if ang < best:
+            best = ang
+    return best
 
 
-def midpt(p1, p2):
-    return ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
-
-
-def seg_len(seg):
-    return dist(seg[0], seg[1])
-
-
-def properly_crosses(p1, p2, p3, p4):
-    """Return True if segment p1-p2 crosses segment p3-p4 at an interior point."""
-    s1 = LineString([p1, p2])
-    s2 = LineString([p3, p4])
-    inter = s1.intersection(s2)
-    if inter.is_empty:
+def _connection_ok(mx, my, tx, ty, seg_arr, model, min_angle):
+    """Visibility + (model 2) angle check for proposed edge (mx,my)→(tx,ty)."""
+    if _segment_blocks(mx, my, tx, ty, seg_arr):
         return False
-    if inter.geom_type == 'Point':
-        x, y = inter.x, inter.y
-        for ep in (p1, p2, p3, p4):
-            if abs(x - ep[0]) < EPS and abs(y - ep[1]) < EPS:
-                return False   # touching at an endpoint only
-        return True
-    return True  # line overlap
-
-
-def is_visible(p, q, segments):
-    """Can p see q without any segment (not incident to p or q) blocking the view?"""
-    for a, b in segments:
-        if dist(a, p) < EPS or dist(b, p) < EPS:
-            continue
-        if dist(a, q) < EPS or dist(b, q) < EPS:
-            continue
-        if properly_crosses(p, q, a, b):
+    if model == 2:
+        vx, vy = tx - mx, ty - my
+        if _min_incident_angle(mx, my, vx, vy, seg_arr) < min_angle:
+            return False
+        if _min_incident_angle(tx, ty, -vx, -vy, seg_arr) < min_angle:
             return False
     return True
 
 
-def min_angle_at(node, new_vec, segments):
-    """Minimum angle (radians) between new_vec and every existing edge at node."""
-    nv = np.asarray(new_vec, dtype=float)
-    nv_norm = np.linalg.norm(nv)
-    min_ang = np.pi
-    for a, b in segments:
-        if dist(a, node) < EPS:
-            other = b
-        elif dist(b, node) < EPS:
-            other = a
-        else:
-            continue
-        ev = np.asarray(other, dtype=float) - np.asarray(node, dtype=float)
-        ev_norm = np.linalg.norm(ev)
-        if ev_norm < EPS or nv_norm < EPS:
-            continue
-        cos_a = np.clip(np.dot(nv, ev) / (nv_norm * ev_norm), -1.0, 1.0)
-        min_ang = min(min_ang, np.arccos(cos_a))
-    return min_ang
-
-
-def angles_ok(m, target, segments, min_angle=np.pi / 4):
-    """Check angle constraint at both endpoints of the proposed new edge m->target."""
-    vec = (target[0] - m[0], target[1] - m[1])
-    if min_angle_at(m,      vec,                   segments) < min_angle:
-        return False
-    if min_angle_at(target, (-vec[0], -vec[1]),    segments) < min_angle:
-        return False
-    return True
-
-
 # --------------------------------------------------------------------------- #
-# Vectorized geometry helpers (used by run_model for speed)                    #
+# Initialisation                                                              #
 # --------------------------------------------------------------------------- #
 
-def _is_visible_vec(p, q, seg_arr):
-    """Vectorized visibility check against a numpy segment array (N, 2, 2)."""
-    if len(seg_arr) == 0:
-        return True
-    px, py = p
-    qx, qy = q
-    ax = seg_arr[:, 0, 0];  ay = seg_arr[:, 0, 1]
-    bx = seg_arr[:, 1, 0];  by = seg_arr[:, 1, 1]
+def _initial_segments():
+    """Unit square + 4 lines through the centre → 8 segments."""
+    c = (CENTER_X, CENTER_Y)
+    spokes = [
+        ((0.0, 0.5), (1.0, 0.5)),
+        ((0.5, 0.0), (0.5, 1.0)),
+        ((0.0, 0.0), (1.0, 1.0)),
+        ((1.0, 0.0), (0.0, 1.0)),
+    ]
+    out = []
+    for p1, p2 in spokes:
+        out.append((p1, c))
+        out.append((c, p2))
+    return out
 
-    # Exclude segments incident to p or q
-    inc = (((np.abs(ax - px) < EPS) & (np.abs(ay - py) < EPS)) |
-           ((np.abs(bx - px) < EPS) & (np.abs(by - py) < EPS)) |
-           ((np.abs(ax - qx) < EPS) & (np.abs(ay - qy) < EPS)) |
-           ((np.abs(bx - qx) < EPS) & (np.abs(by - qy) < EPS)))
-    ax, ay, bx, by = ax[~inc], ay[~inc], bx[~inc], by[~inc]
-    if len(ax) == 0:
-        return True
-
-    # Proper crossing test via cross products
-    d1 = (qx - px) * (ay - py) - (qy - py) * (ax - px)
-    d2 = (qx - px) * (by - py) - (qy - py) * (bx - px)
-    d3 = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-    d4 = (bx - ax) * (qy - ay) - (by - ay) * (qx - ax)
-    return not np.any((d1 * d2 < 0) & (d3 * d4 < 0))
-
-
-def _min_angle_at_vec(node, new_vec, seg_arr):
-    """Vectorized minimum angle at node against a numpy segment array (N, 2, 2)."""
-    if len(seg_arr) == 0:
-        return np.pi
-    nx, ny = node
-    ax = seg_arr[:, 0, 0];  ay = seg_arr[:, 0, 1]
-    bx = seg_arr[:, 1, 0];  by = seg_arr[:, 1, 1]
-
-    inc_a = (np.abs(ax - nx) < EPS) & (np.abs(ay - ny) < EPS)
-    inc_b = (np.abs(bx - nx) < EPS) & (np.abs(by - ny) < EPS)
-    incident = inc_a | inc_b
-    if not incident.any():
-        return np.pi
-
-    ox = np.where(inc_a[incident], bx[incident], ax[incident])
-    oy = np.where(inc_a[incident], by[incident], ay[incident])
-    evx, evy = ox - nx, oy - ny
-    ev_norms = np.hypot(evx, evy)
-
-    nv = np.asarray(new_vec, dtype=float)
-    nv_norm = np.linalg.norm(nv)
-    if nv_norm < EPS:
-        return np.pi
-
-    valid = ev_norms > EPS
-    if not valid.any():
-        return np.pi
-
-    cos_a = np.clip(
-        (nv[0] * evx[valid] + nv[1] * evy[valid]) / (nv_norm * ev_norms[valid]),
-        -1.0, 1.0,
-    )
-    return float(np.arccos(cos_a).min())
-
-
-def _angles_ok_vec(m, target, seg_arr, min_angle=np.pi / 4):
-    vec = (target[0] - m[0], target[1] - m[1])
-    if _min_angle_at_vec(m,      vec,                  seg_arr) < min_angle:
-        return False
-    if _min_angle_at_vec(target, (-vec[0], -vec[1]),   seg_arr) < min_angle:
-        return False
-    return True
-
-
-def area_ok(seg, mid, area_coeff=0.05, area_scale=1.0):
-    """
-    Model 2 area constraint: the approximate polygon area after splitting
-    must satisfy A(r) > area_coeff * exp(-area_scale/r), where r is distance
-    from centre. A polygon's area is approximated as (half-segment-length)^2.
-    """
-    r = dist(mid, CENTER)
-    if r < EPS:
-        return True
-    min_area = area_coeff * np.exp(-area_scale / r)
-    approx_area = (seg_len(seg) / 2.0) ** 2
-    return approx_area >= min_area
-
-
-# --------------------------------------------------------------------------- #
-# Node bookkeeping                                                               #
-# --------------------------------------------------------------------------- #
 
 def nkey(p, decimals=8):
-    """Hashable key for a point, rounded to avoid floating-point duplicates."""
     return (round(p[0], decimals), round(p[1], decimals))
 
 
-def unique_nodes(segments):
-    """Return a list of all unique nodes appearing in segments."""
-    seen = {}
-    for a, b in segments:
-        seen[nkey(a)] = a
-        seen[nkey(b)] = b
-    return list(seen.values())
-
-
 # --------------------------------------------------------------------------- #
-# Initialisation                                                                 #
-# --------------------------------------------------------------------------- #
-
-def initialize():
-    """
-    Unit square divided by 4 lines (horizontal, vertical, two diagonals)
-    all passing through the centre -> 8 initial segments.
-    """
-    c = CENTER
-    line_ends = [
-        ((0.0, 0.5), (1.0, 0.5)),   # horizontal
-        ((0.5, 0.0), (0.5, 1.0)),   # vertical
-        ((0.0, 0.0), (1.0, 1.0)),   # diagonal
-        ((1.0, 0.0), (0.0, 1.0)),   # anti-diagonal
-    ]
-    segs = []
-    for p1, p2 in line_ends:
-        segs.append((p1, c))
-        segs.append((c, p2))
-    return segs
-
-
-# --------------------------------------------------------------------------- #
-# Main simulation                                                                #
+# Main simulation                                                             #
 # --------------------------------------------------------------------------- #
 
 def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
-              min_angle=np.pi / 4, area_coeff=0.05, area_scale=1.0):
-    """
-    Run the space-filling model.
+              min_angle=np.pi / 4, area_coeff=0.05, area_scale=1.0,
+              verbose=True):
+    """Run the space-filling model.
 
     Parameters
     ----------
-    model      : 1 (basic) or 2 (with area + angle biases)
-    min_length : segments shorter than this are never split
-    max_iter   : hard iteration cap
-    seed       : random seed
-    min_angle  : (model 2) minimum allowed angle at intersections in radians
-    area_coeff : (model 2) coefficient in area constraint: area_coeff * exp(-area_scale/r)
-    area_scale : (model 2) scale factor in area constraint exponent
-    """
-    np.random.seed(seed)
-    init = initialize()
+    model      : 1 (basic) or 2 (area + angle biases).
+    min_length : segments shorter than this are never split.
+    max_iter   : hard iteration cap.
+    seed       : RNG seed.
+    min_angle  : (model 2) minimum allowed intersection angle, radians.
+    area_coeff : (model 2) coefficient in area_coeff·exp(-area_scale/r).
+    area_scale : (model 2) scale factor in the area-constraint exponent.
+    verbose    : print convergence / cap messages.
 
-    # Pre-allocate segment array with capacity doubling (avoids O(N) Python→C
-    # conversions on every iteration).
+    Returns a list of segments [((x1,y1),(x2,y2)), ...].
+    """
+    rng = np.random.default_rng(seed)
+    init = _initial_segments()
+
+    # Segments stored in a capacity-doubling numpy buffer; live count is `n`.
     capacity = max(len(init) * 4, 64)
     seg_arr = np.empty((capacity, 2, 2), dtype=np.float64)
-    n = len(init)
     for i, (a, b) in enumerate(init):
         seg_arr[i, 0] = a
         seg_arr[i, 1] = b
+    n = len(init)
 
-    # Incremental node tracking: nkey → index in node_arr
-    node_keys  = {}   # nkey(pt) -> row index in node_arr
-    node_cap   = capacity * 2
-    node_arr   = np.empty((node_cap, 2), dtype=np.float64)
-    n_nodes    = 0
-    for a, b in init:
-        for pt in (a, b):
-            k = nkey(pt)
-            if k not in node_keys:
-                if n_nodes >= node_cap:
-                    node_cap *= 2
-                    node_arr = np.resize(node_arr, (node_cap, 2))
-                node_arr[n_nodes] = pt
-                node_keys[k] = n_nodes
-                n_nodes += 1
+    # Node table: nkey → row index in node_arr (capacity-doubled).
+    node_keys = {}
+    node_arr = np.empty((capacity * 2, 2), dtype=np.float64)
+    n_nodes = 0
 
-    def _add_node(pt):
-        nonlocal n_nodes, node_cap, node_arr
+    def add_node(pt):
+        nonlocal n_nodes, node_arr
         k = nkey(pt)
-        if k not in node_keys:
-            if n_nodes >= node_cap:
-                node_cap *= 2
-                node_arr = np.resize(node_arr, (node_cap, 2))
-            node_arr[n_nodes] = pt
-            node_keys[k] = n_nodes
-            n_nodes += 1
-        return node_keys[k]
+        idx = node_keys.get(k)
+        if idx is not None:
+            return idx
+        if n_nodes >= node_arr.shape[0]:
+            new = np.empty((node_arr.shape[0] * 2, 2), dtype=np.float64)
+            new[:n_nodes] = node_arr[:n_nodes]
+            node_arr = new
+        node_arr[n_nodes] = pt
+        node_keys[k] = n_nodes
+        n_nodes += 1
+        return n_nodes - 1
 
-    def _ensure_seg_cap(needed):
-        nonlocal capacity, seg_arr
-        if needed > capacity:
-            capacity = max(capacity * 2, needed)
-            new = np.empty((capacity, 2, 2), dtype=np.float64)
-            new[:n] = seg_arr[:n]
-            seg_arr = new
+    def grow_segs(extra):
+        nonlocal seg_arr
+        if n + extra <= seg_arr.shape[0]:
+            return
+        new_cap = max(seg_arr.shape[0] * 2, n + extra)
+        new = np.empty((new_cap, 2, 2), dtype=np.float64)
+        new[:n] = seg_arr[:n]
+        seg_arr = new
 
+    for a, b in init:
+        add_node(a)
+        add_node(b)
+
+    converged = False
     for it in range(max_iter):
-        sa = seg_arr[:n]   # live view — no copy
+        sa = seg_arr[:n]
+        dx = sa[:, 1, 0] - sa[:, 0, 0]
+        dy = sa[:, 1, 1] - sa[:, 0, 1]
+        lengths = np.hypot(dx, dy)
 
-        lengths = np.hypot(
-            sa[:, 1, 0] - sa[:, 0, 0],
-            sa[:, 1, 1] - sa[:, 0, 1],
-        )
-
-        eligible_mask = lengths > min_length
-
-        # Model 2: vectorised area constraint
+        eligible = lengths > min_length
         if model == 2:
-            mids = (sa[:, 0] + sa[:, 1]) * 0.5
-            r = np.hypot(mids[:, 0] - CENTER[0], mids[:, 1] - CENTER[1])
+            mx = (sa[:, 0, 0] + sa[:, 1, 0]) * 0.5
+            my = (sa[:, 0, 1] + sa[:, 1, 1]) * 0.5
+            r = np.hypot(mx - CENTER_X, my - CENTER_Y)
             with np.errstate(divide='ignore', invalid='ignore'):
-                min_area_arr = np.where(
-                    r > EPS, area_coeff * np.exp(-area_scale / r), 0.0
-                )
-            eligible_mask &= (lengths * 0.5) ** 2 >= min_area_arr
+                min_area = np.where(r > EPS,
+                                    area_coeff * np.exp(-area_scale / r), 0.0)
+            eligible &= (lengths * 0.5) ** 2 >= min_area
 
-        eligible_indices = np.where(eligible_mask)[0]
-        if len(eligible_indices) == 0:
-            print(f"  Model {model}: converged at iteration {it} with {n} segments")
+        elig_idx = np.flatnonzero(eligible)
+        if elig_idx.size == 0:
+            converged = True
             break
 
-        # Sample proportional to length
-        elig_lengths = lengths[eligible_indices]
-        probs = elig_lengths / elig_lengths.sum()
-        choice_idx = int(np.random.choice(len(eligible_indices), p=probs))
-        seg_i = int(eligible_indices[choice_idx])
+        # Length-weighted sampling via inverse-CDF (faster than np.random.choice).
+        elig_lengths = lengths[elig_idx]
+        cdf = np.cumsum(elig_lengths)
+        seg_i = int(elig_idx[np.searchsorted(cdf, rng.random() * cdf[-1])])
 
-        a = tuple(sa[seg_i, 0])
-        b = tuple(sa[seg_i, 1])
-        m = midpt(a, b)
+        ax, ay = sa[seg_i, 0]
+        bx, by = sa[seg_i, 1]
+        midx, midy = 0.5 * (ax + bx), 0.5 * (ay + by)
 
-        # Swap-remove seg_i: O(1), no shifting
+        # Replace segment with its two halves (swap-remove + append).
+        grow_segs(2)
+        seg_arr[seg_i] = seg_arr[n - 1]
         n -= 1
-        seg_arr[seg_i] = seg_arr[n]
+        seg_arr[n, 0] = (ax, ay); seg_arr[n, 1] = (midx, midy); n += 1
+        seg_arr[n, 0] = (midx, midy); seg_arr[n, 1] = (bx, by); n += 1
 
-        # Append (a,m) and (m,b)
-        _ensure_seg_cap(n + 2)
-        seg_arr[n,   0] = a;  seg_arr[n,   1] = m;  n += 1
-        seg_arr[n,   0] = m;  seg_arr[n,   1] = b;  n += 1
+        m_idx = add_node((midx, midy))
+        a_idx = node_keys[nkey((ax, ay))]
+        b_idx = node_keys[nkey((bx, by))]
 
-        # Register new node m (a and b already tracked)
-        m_idx = _add_node(m)
-        a_idx = node_keys[nkey(a)]
-        b_idx = node_keys[nkey(b)]
-
-        # Build candidate array: all nodes except m, a, b
-        all_nodes = node_arr[:n_nodes]
-        excl = np.array([m_idx, a_idx, b_idx])
-        mask = np.ones(n_nodes, dtype=bool)
-        mask[excl] = False
-        candidates = all_nodes[mask]
-
+        # Candidate nodes for the new connection: all except m, a, b.
+        keep = np.ones(n_nodes, dtype=bool)
+        keep[[m_idx, a_idx, b_idx]] = False
+        candidates = node_arr[:n_nodes][keep]
         if len(candidates) == 0:
             continue
 
-        sa = seg_arr[:n]   # refresh view after modifications
-
-        # Query only the k nearest neighbours — avoids full sort (huge speedup).
-        # Fall back to all candidates only if the initial batch yields nothing.
-        K_INIT = min(30, len(candidates))
+        sa = seg_arr[:n]
         tree = cKDTree(candidates)
-        dists, indices = tree.query(m, k=K_INIT, workers=1)
-        if K_INIT == 1:
-            dists, indices = [float(dists)], [int(indices)]
+        k = min(30, len(candidates))
+        _, idxs = tree.query((midx, midy), k=k)
+        idxs = np.atleast_1d(idxs)
 
-        best_node = None
-        for idx in indices:
-            node = tuple(candidates[idx])
-            if not _is_visible_vec(m, node, sa):
-                continue
-            if model == 2 and not _angles_ok_vec(m, node, sa, min_angle):
-                continue
-            best_node = node
-            break
+        best = _find_best(midx, midy, candidates, idxs, sa, model, min_angle)
+        if best is None and k < len(candidates):
+            _, idxs_all = tree.query((midx, midy), k=len(candidates))
+            best = _find_best(midx, midy, candidates, idxs_all[k:], sa,
+                              model, min_angle)
 
-        # Fallback: expand to all candidates (rare)
-        if best_node is None and K_INIT < len(candidates):
-            _, indices_all = tree.query(m, k=len(candidates), workers=1)
-            for idx in indices_all[K_INIT:]:
-                node = tuple(candidates[idx])
-                if not _is_visible_vec(m, node, sa):
-                    continue
-                if model == 2 and not _angles_ok_vec(m, node, sa, min_angle):
-                    continue
-                best_node = node
-                break
-
-        if best_node is not None:
-            _ensure_seg_cap(n + 1)
-            seg_arr[n, 0] = m
-            seg_arr[n, 1] = best_node
+        if best is not None:
+            grow_segs(1)
+            seg_arr[n, 0] = (midx, midy)
+            seg_arr[n, 1] = best
             n += 1
+            add_node(best)
 
-    else:
-        print(f"  Model {model}: hit max_iter={max_iter}, {n} segments")
+    if verbose:
+        if converged:
+            print(f"  Model {model}: converged at iteration {it} with {n} segments")
+        else:
+            print(f"  Model {model}: hit max_iter={max_iter}, {n} segments")
 
     return [(tuple(seg_arr[i, 0]), tuple(seg_arr[i, 1])) for i in range(n)]
 
 
+def _find_best(mx, my, candidates, idxs, seg_arr, model, min_angle):
+    """Return first candidate (by nearest-first order) that passes checks."""
+    for idx in idxs:
+        tx, ty = candidates[idx]
+        if _connection_ok(mx, my, tx, ty, seg_arr, model, min_angle):
+            return (float(tx), float(ty))
+    return None
+
+
 # --------------------------------------------------------------------------- #
-# Shapefile export                                                               #
+# Parallel ensemble                                                           #
+# --------------------------------------------------------------------------- #
+
+def _ensemble_worker(args):
+    kwargs, seed = args
+    return run_model(seed=seed, verbose=False, **kwargs)
+
+
+def run_ensemble(seeds, processes=None, **kwargs):
+    """Run `run_model` over many seeds in parallel.
+
+    Parameters
+    ----------
+    seeds     : iterable of RNG seeds.
+    processes : worker count (default: os.cpu_count()).
+    **kwargs  : forwarded to `run_model` (model, min_length, max_iter, ...).
+
+    Returns a list of segment lists, one per seed (in input order).
+    """
+    seeds = list(seeds)
+    if processes is None:
+        processes = os.cpu_count() or 1
+    payload = [(kwargs, s) for s in seeds]
+    with Pool(processes=processes) as pool:
+        return pool.map(_ensemble_worker, payload)
+
+
+# --------------------------------------------------------------------------- #
+# GeoDataFrame / shapefile export                                              #
 # --------------------------------------------------------------------------- #
 
 def compute_degrees(segments):
-    """Return a dict mapping each node key to its degree."""
     deg = defaultdict(int)
     for a, b in segments:
         deg[nkey(a)] += 1
@@ -419,26 +333,19 @@ def compute_degrees(segments):
 
 
 def to_geodataframe(segments, model_id):
-    """
-    Convert a list of (point, point) segments to a GeoDataFrame.
-
-    Attributes per segment:
-      model     – model number (1 or 2)
-      length    – Euclidean length of the segment
-      deg_start – degree of the start node
-      deg_end   – degree of the end node
-    """
+    """Convert segments to a GeoDataFrame with length and node degrees."""
     degrees = compute_degrees(segments)
-    records = []
-    for a, b in segments:
-        records.append({
+    records = [
+        {
             'geometry':  LineString([a, b]),
             'model':     model_id,
-            'length':    seg_len((a, b)),
+            'length':    float(np.hypot(b[0] - a[0], b[1] - a[1])),
             'deg_start': degrees.get(nkey(a), 0),
             'deg_end':   degrees.get(nkey(b), 0),
-        })
-    return gpd.GeoDataFrame(records, crs='EPSG:4326')
+        }
+        for a, b in segments
+    ]
+    return gpd.GeoDataFrame(records)
 
 
 def save_shapefile(segs, model_id, path):
@@ -448,32 +355,19 @@ def save_shapefile(segs, model_id, path):
     return gdf
 
 
-def get_geodataframe(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
-                     min_angle=np.pi / 4, area_coeff=0.05, area_scale=1.0):
-    """
-    Run the model and return the result as a GeoDataFrame (no file I/O).
-
-    Parameters
-    ----------
-    model      : 1 (basic) or 2 (with area + angle biases)
-    min_length : segments shorter than this are never split
-    max_iter   : hard iteration cap
-    seed       : random seed
-    min_angle  : (model 2) minimum allowed angle at intersections in radians
-    area_coeff : (model 2) coefficient in area constraint: area_coeff * exp(-area_scale/r)
-    area_scale : (model 2) scale factor in area constraint exponent
-    """
-    segs = run_model(model=model, min_length=min_length, max_iter=max_iter, seed=seed,
-                     min_angle=min_angle, area_coeff=area_coeff, area_scale=area_scale)
+def get_geodataframe(model=1, **kwargs):
+    """Run `run_model` and return the result as a GeoDataFrame."""
+    segs = run_model(model=model, **kwargs)
     return to_geodataframe(segs, model_id=model)
 
 
 # --------------------------------------------------------------------------- #
-# Entry point                                                                    #
+# Entry point                                                                  #
 # --------------------------------------------------------------------------- #
 
 if __name__ == '__main__':
-    print("=== Space-Filling Street Network Model ===\n")
+    print("=== Space-Filling Street Network Model ===")
+    print(f"  numba JIT: {'on' if HAS_NUMBA else 'off (install numba for speedup)'}\n")
 
     print("Running Model 1 (basic)...")
     segs1 = run_model(model=1, seed=42)
