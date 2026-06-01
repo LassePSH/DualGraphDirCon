@@ -28,9 +28,10 @@ from dgdc import get_dual_dir_con
 G = ox.graph_from_place("Amsterdam, Netherlands", network_type="all")
 
 gdf_merged, H, shape_exploded_df, lines = get_dual_dir_con(
-    t_buffer=10,       # buffer radius (m) around intersection touch points
-    a_threshold=20,    # max angle (degrees) to consider streets continuous
+    t_buffer=10,             # buffer radius (m) around intersection touch points
+    a_threshold=20,          # max angle (degrees) to consider streets continuous
     data=G,
+    simplify_roundabout=True, # collapse roundabouts to nodes before analysis
     enforce_degree2=False
 )
 ```
@@ -59,6 +60,16 @@ segs = run_model(model=2, seed=42, min_angle=np.pi/4)
 - **Model 1 (basic):** Select segment proportional to length, split at midpoint, connect to nearest visible intersection
 - **Model 2 (biased):** Same as Model 1 with constraints: polygon area `A(r) > 0.05 * exp(-1/r)` and all intersection angles > π/4
 
+#### Real-Area Variant
+
+`space_filling_model/real_space_filling.py` runs the same model at real city
+size — inside the convex hull of a real city (in UTM metres) instead of the unit
+square. It supports `"spokes"` and `"roads"` init modes.
+
+```bash
+python space_filling_model/real_space_filling.py
+```
+
 ### Sierpinski Carpet Model
 
 Apply the DGDC algorithm to a synthetic fractal street network generated from the Sierpinski carpet:
@@ -81,13 +92,30 @@ python sierpinski_carpet_model/sierpinski_carpet.py
 
 ### City-Scale Analysis
 
-Compute dual graph degree sequences for ~84 cities in parallel:
+Compute dual graph degree sequences for ~96 cities in parallel:
 
 ```bash
 python cities/regime.py
 ```
 
-Results are saved to `data/city_degrees/t10_a20/<city>.out`.
+Results are saved to `data/city_degrees/t<t_buffer>_a<a_threshold>/<city>.out`.
+
+### Additional Analyses
+
+```bash
+# COINS-stroke dual-graph degree distribution (continuity-stroke baseline vs DGDC)
+python COINS_comparison/coins_degrees.py --a_threshold 20 --processes 20
+
+# Per-edge street compass bearings, two methods (Boeing 2019)
+python city_orientation/compute_orientations.py --processes 20
+
+# Match Sensible-DTU mobility points to nearest Copenhagen street segment
+python mobility/match_sensible.py
+```
+
+Per-city contextual attributes (population, founding era, street pattern,
+climate, etc.) live in `data/city_external/city_info.csv`; see its README for
+column descriptions and sources.
 
 ## Project Structure
 
@@ -96,14 +124,21 @@ dgdc/                        # Core DGDC package
   dual_conti.py              # Main algorithm
   __init__.py
 space_filling_model/
-  space_filling.py           # Generative street model
+  space_filling.py           # Generative street model (unit square)
+  real_space_filling.py      # Real-area variant (city hull, water excluded)
 sierpinski_carpet_model/
   sierpinski_carpet.py       # Sierpinski carpet network + DGDC analysis
 cities/
-  regime.py                  # Batch city analysis (84 cities, 20 parallel processes)
+  regime.py                  # Batch city analysis (~96 cities, 20 parallel processes)
+  regime_grid_search.py      # Sweep over (t_buffer, a_threshold)
+  download_cities.py         # Cache OSM graphs to data/city_graphs/
   cities.txt                 # List of cities
+city_angles/                 # Per-intersection dual-graph angle dumps
+COINS_comparison/            # COINS-stroke dual-graph degree baseline
+city_orientation/            # Per-edge street bearings
+mobility/                    # Sensible-DTU trajectory-to-network matching
 notebooks_lasse/             # Exploratory Jupyter notebooks
-data/                        # Output data
+data/                        # Cached graphs and analysis outputs
 ```
 
 ## Dependencies
