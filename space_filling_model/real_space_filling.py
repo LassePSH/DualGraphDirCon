@@ -32,7 +32,7 @@ import numpy as np
 import osmnx as ox
 import pandas as pd
 from scipy.spatial import cKDTree
-from shapely.geometry import LineString, MultiLineString, Polygon
+from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import unary_union
 from shapely.prepared import prep
 from shapely.strtree import STRtree
@@ -81,6 +81,12 @@ def load_city_graph(city: str):
         raise FileNotFoundError(f'No cached graph for {city!r} in {GRAPH_DIR}')
     G = ox.load_graphml(path)
     return ox.project_graph(G)
+
+
+def circular_area_polygon(area_m2: float, center=(0.0, 0.0), resolution: int = 128) -> Polygon:
+    """Circle with prescribed area (m^2) centred at `center`."""
+    radius = float(np.sqrt(area_m2 / np.pi))
+    return Point(center).buffer(radius, resolution=resolution)
 
 
 def area_polygon_from_graph(G_proj) -> Polygon:
@@ -327,7 +333,7 @@ def _find_best_water_safe(mx, my, candidates, idxs, seg_arr, model, min_angle,
 def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
          model=1, min_length=50.0, max_iter=200_000, seed=42,
          min_angle=np.pi / 4, area_coeff=2500.0, area_scale=None,
-         verbose=True):
+         kdtree_rebuild_every=256, progress_every=0, verbose=True):
     """Core loop. `seg_init` are splittable seeds; `blocking_segs` are not."""
     rng = np.random.default_rng(seed)
 
@@ -394,10 +400,23 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
         # characteristic radius of the area in metres
         area_scale = float(np.sqrt(area_poly.area / np.pi))
 
+    # Persistent KD-tree state. Rebuilding the tree from scratch every iteration
+    # was O(N log N) per step → O(N^2 log N) overall and dominated runtime. We
+    # instead rebuild only every `kdtree_rebuild_every` node insertions and
+    # brute-force the handful of nodes added since the last rebuild.
+    tree = None
+    tree_n = 0
+
     converged = False
     last_it = 0
+    show_progress = bool(progress_every) and verbose
     for it in range(max_iter):
         last_it = it
+        # Lightweight progress: a single rewritten line every `progress_every`
+        # iterations (the modulo test is the only per-iteration cost).
+        if show_progress and it % progress_every == 0:
+            print(f'\r  Real model {model}: iter {it}/{max_iter}, '
+                  f'{n} segs', end='', flush=True)
         sa = seg_arr[:n]
         dx = sa[:, 1, 0] - sa[:, 0, 0]
         dy = sa[:, 1, 1] - sa[:, 0, 1]
@@ -441,26 +460,49 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
         a_idx = node_keys[nkey((ax, ay))]
         b_idx = node_keys[nkey((bx, by))]
 
-        keep = np.ones(n_nodes, dtype=bool)
-        keep[[m_idx, a_idx, b_idx]] = False
-        candidates = node_arr[:n_nodes][keep]
-        if len(candidates) == 0:
+        if n_nodes <= 3:
             continue
 
         sa = seg_arr[:n]
-        tree = cKDTree(candidates)
-        k = min(30, len(candidates))
-        _, idxs = tree.query((midx, midy), k=k)
-        idxs = np.atleast_1d(idxs)
+
+        # (Re)build the tree only when enough new nodes have accumulated.
+        if tree is None or (n_nodes - tree_n) >= kdtree_rebuild_every:
+            tree = cKDTree(node_arr[:n_nodes].copy())
+            tree_n = n_nodes
+
+        exclude = (m_idx, a_idx, b_idx)
+
+        def _ordered(limit):
+            """Candidate coords nearest-first, excluding m/a/b nodes."""
+            k = min(limit, tree_n)
+            if k > 0:
+                d, gi = tree.query((midx, midy), k=k)
+                gi = np.atleast_1d(gi).astype(np.intp)
+                d = np.atleast_1d(d)
+            else:
+                gi = np.empty(0, dtype=np.intp)
+                d = np.empty(0)
+            if n_nodes > tree_n:  # brute-force the nodes added since last build
+                pend = np.arange(tree_n, n_nodes, dtype=np.intp)
+                pv = node_arr[pend]
+                pd = np.hypot(pv[:, 0] - midx, pv[:, 1] - midy)
+                gi = np.concatenate([gi, pend])
+                d = np.concatenate([d, pd])
+            gi = gi[np.argsort(d, kind='stable')]
+            mask = (gi != exclude[0]) & (gi != exclude[1]) & (gi != exclude[2])
+            return node_arr[gi[mask]]
 
         def _check(b):
             return crosses_water is None or not crosses_water((midx, midy), b)
 
-        best = _find_best_water_safe(midx, midy, candidates, idxs, sa,
+        cand = _ordered(30)
+        if len(cand) == 0:
+            continue
+        best = _find_best_water_safe(midx, midy, cand, range(len(cand)), sa,
                                      model, min_angle, _check)
-        if best is None and k < len(candidates):
-            _, idxs_all = tree.query((midx, midy), k=len(candidates))
-            best = _find_best_water_safe(midx, midy, candidates, idxs_all[k:],
+        if best is None and tree_n > 30:  # widen search to all nodes
+            cand_all = _ordered(tree_n)
+            best = _find_best_water_safe(midx, midy, cand_all, range(len(cand_all)),
                                          sa, model, min_angle, _check)
 
         if best is not None:
@@ -471,6 +513,8 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
             n += 1
             add_node(best)
 
+    if show_progress:
+        print()  # finish the in-place progress line
     if verbose:
         tag = 'converged' if converged else f'hit max_iter={max_iter}'
         print(f'  Real model {model}: {tag} at iter {last_it} with {n} segs '
@@ -488,6 +532,7 @@ def run_real_model(city: str, *, init: str = 'spokes', model: int = 1,
                    highway_tags: Sequence[str] = DEFAULT_HIGHWAY_TAGS,
                    area_coeff: float = 2500.0,
                    area_scale: Optional[float] = None,
+                   kdtree_rebuild_every: int = 256,
                    use_water_cache: bool = True,
                    verbose: bool = True):
     """Run the real-area space-filling model for `city`.
@@ -527,7 +572,7 @@ def run_real_model(city: str, *, init: str = 'spokes', model: int = 1,
                     model=model, min_length=min_length, max_iter=max_iter,
                     seed=seed, min_angle=min_angle,
                     area_coeff=area_coeff, area_scale=area_scale,
-                    verbose=verbose)
+                    kdtree_rebuild_every=kdtree_rebuild_every, verbose=verbose)
 
     return {
         'segments': segments,
@@ -537,6 +582,53 @@ def run_real_model(city: str, *, init: str = 'spokes', model: int = 1,
         'crs': crs,
         'init': init,
         'model': model,
+    }
+
+
+def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] = None,
+                       model: int = 1, min_length: float = 50.0,
+                       min_angle: float = np.pi / 4, max_iter: int = 200_000,
+                       seed: int = 42, n_spokes: int = 8,
+                       area_coeff: float = 2500.0,
+                       area_scale: Optional[float] = None,
+                       kdtree_rebuild_every: int = 256,
+                       progress_every: int = 1000,
+                       crs=None, verbose: bool = True):
+    """Run the space-filling model on a plain circular domain (no water).
+
+    The circle's area matches the convex-hull area of `city` (if given) or the
+    explicit `area_m2`. Useful for comparing model parameters in metres against
+    real-city parameters without confounds from coastline geometry.
+    """
+    if area_m2 is None:
+        if city is None:
+            raise ValueError('Provide either `city` or `area_m2`')
+        G_proj = load_city_graph(city)
+        area_m2 = float(area_polygon_from_graph(G_proj).area)
+        if crs is None:
+            crs = G_proj.graph['crs']
+
+    area = circular_area_polygon(area_m2)
+    land = area
+    seeds = init_spokes(area, land, n_spokes=n_spokes, crosses_water=None)
+    blockers = boundary_segments(area)
+
+    segments = _run(seeds, blockers, area, crosses_water=None,
+                    model=model, min_length=min_length, max_iter=max_iter,
+                    seed=seed, min_angle=min_angle,
+                    area_coeff=area_coeff, area_scale=area_scale,
+                    kdtree_rebuild_every=kdtree_rebuild_every,
+                    progress_every=progress_every, verbose=verbose)
+
+    return {
+        'segments': segments,
+        'area_polygon': area,
+        'land_polygon': land,
+        'water': gpd.GeoDataFrame(geometry=[], crs=crs),
+        'crs': crs,
+        'init': 'spokes',
+        'model': model,
+        'area_m2': area_m2,
     }
 
 
