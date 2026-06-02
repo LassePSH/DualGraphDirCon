@@ -15,6 +15,16 @@ Geometry units throughout the public API are metres. The returned GeoDataFrame
 is always georeferenced: when a `city` is given its local UTM CRS is used,
 otherwise the CRS defaults to EPSG:32632 (UTM zone 32N). Defaults:
 `min_length=50` m, `min_angle=π/4`.
+
+Set `p_stub` (default 0.0) to inject random dead-end stubs that populate the
+low-degree shoulder of the dual-graph degree distribution. Stubs are additive
+(the main RNG stream is unchanged) but planar (a placed stub blocks later
+connections). Each stub grows from a split midpoint or a random existing
+intersection; its free end either dangles as a cul-de-sac (degree-1) or T's
+into a nearby street within `snap_tol` (degree-2). `stub_len_max` (default
+`3*min_length`) bounds stub length and `snap_tol` (default `min_length`) is the
+T-in distance: a small `snap_tol` yields mostly cul-de-sacs, the default yields
+mostly degree-2 T-ins.
 """
 
 from __future__ import annotations
