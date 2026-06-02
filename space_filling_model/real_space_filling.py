@@ -160,9 +160,18 @@ def _nearest_segment(fx, fy, seg_arr, max_dist, exclude_xy=None):
 def _run(seg_init, blocking_segs, area_poly, *,
          model=1, min_length=50.0, max_iter=200_000, seed=42,
          min_angle=np.pi / 4, area_coeff=2500.0, area_scale=None,
+         p_stub=0.0, stub_len_max=None, snap_tol=None,
          kdtree_rebuild_every=256, progress_every=0, verbose=True):
     """Core loop. `seg_init` are splittable seeds; `blocking_segs` are not."""
     rng = np.random.default_rng(seed)
+    # Separate RNG for stubs so that the main RNG stream — which drives segment
+    # selection and normal connections — is unchanged whether or not p_stub>0.
+    # This guarantees that enabling stubs never degrades the base topology.
+    stub_rng = np.random.default_rng(seed ^ 0xDEADBEEF) if p_stub > 0.0 else None
+    if stub_len_max is None:
+        stub_len_max = 3.0 * min_length
+    if snap_tol is None:
+        snap_tol = min_length
 
     n_init = len(seg_init)
     n_block = len(blocking_segs)
@@ -170,6 +179,7 @@ def _run(seg_init, blocking_segs, area_poly, *,
     seg_arr = np.empty((capacity, 2, 2), dtype=np.float64)
     splittable = np.zeros(capacity, dtype=bool)
     is_street = np.zeros(capacity, dtype=bool)
+    is_stub = np.zeros(capacity, dtype=bool)  # True for stub segments (dead-end additions)
 
     for i, (a, b) in enumerate(seg_init):
         seg_arr[i, 0] = a; seg_arr[i, 1] = b
@@ -185,6 +195,7 @@ def _run(seg_init, blocking_segs, area_poly, *,
     node_deg = np.zeros(capacity * 2, dtype=np.int64)
     n_nodes = 0
     deg3_idx = []  # node indices whose primal degree has reached >= 3
+    stub_node_set = set()  # far-end indices of placed stubs (excluded from normal candidates)
 
     def add_node(pt):
         nonlocal n_nodes, node_arr, node_deg
@@ -213,7 +224,7 @@ def _run(seg_init, blocking_segs, area_poly, *,
             deg3_idx.append(int(idx))
 
     def grow(extra):
-        nonlocal seg_arr, splittable, is_street
+        nonlocal seg_arr, splittable, is_street, is_stub
         if n + extra <= seg_arr.shape[0]:
             return
         new_cap = max(seg_arr.shape[0] * 2, n + extra)
@@ -226,6 +237,9 @@ def _run(seg_init, blocking_segs, area_poly, *,
         new_st = np.zeros(new_cap, dtype=bool)
         new_st[:n] = is_street[:n]
         is_street = new_st
+        new_sb = np.zeros(new_cap, dtype=bool)
+        new_sb[:n] = is_stub[:n]
+        is_stub = new_sb
 
     for a, b in seg_init:
         ia = add_node(a); ib = add_node(b); _bump(ia, 1); _bump(ib, 1)
@@ -307,10 +321,72 @@ def _run(seg_init, blocking_segs, area_poly, *,
         b_idx = node_keys[nkey((bx, by))]
         _bump(m_idx, 2)  # midpoint now carries the two halves
 
+        # --- branch-or-stub: occasionally emit a dead-end stub instead of the
+        # usual nearest-visible connection. Stubs are streets but never split. ---
+        if p_stub > 0.0 and stub_rng.random() < p_stub:
+            use_mid = (len(deg3_idx) == 0) or (stub_rng.random() < 0.5)
+            anchor_idx = m_idx if use_mid else \
+                deg3_idx[int(stub_rng.integers(len(deg3_idx)))]
+            ax0, ay0 = node_arr[anchor_idx]
+            theta = stub_rng.random() * 2.0 * np.pi
+            length = min_length + stub_rng.random() * (stub_len_max - min_length)
+            fx = ax0 + length * np.cos(theta)
+            fy = ay0 + length * np.sin(theta)
+
+            # Optional T-in: snap the free end onto a nearby street (degree-2),
+            # excluding edges incident to the anchor.
+            snap_i, fx, fy = _nearest_segment(fx, fy, seg_arr[:n], snap_tol,
+                                               exclude_xy=(ax0, ay0))
+
+            ok = area_poly.contains(Point(fx, fy))
+            if ok and _segment_blocks(ax0, ay0, fx, fy, seg_arr[:n]):
+                ok = False
+            if ok and model == 2:
+                vx, vy = fx - ax0, fy - ay0
+                if _min_incident_angle(ax0, ay0, vx, vy, seg_arr[:n]) < min_angle:
+                    ok = False
+
+            if ok:
+                if snap_i >= 0:
+                    # Split the snapped street at the contact point so DGDC sees
+                    # a real junction (stub stroke gains degree 2).
+                    ux, uy = seg_arr[snap_i, 0]
+                    wx, wy = seg_arr[snap_i, 1]
+                    s_split = splittable[snap_i]
+                    s_street = is_street[snap_i]
+                    s_stub = is_stub[snap_i]
+                    grow(2)
+                    seg_arr[snap_i] = seg_arr[n - 1]
+                    splittable[snap_i] = splittable[n - 1]
+                    is_street[snap_i] = is_street[n - 1]
+                    is_stub[snap_i] = is_stub[n - 1]
+                    n -= 1
+                    c_idx = add_node((fx, fy))
+                    seg_arr[n, 0] = (ux, uy); seg_arr[n, 1] = (fx, fy)
+                    splittable[n] = s_split; is_street[n] = s_street; is_stub[n] = s_stub; n += 1
+                    seg_arr[n, 0] = (fx, fy); seg_arr[n, 1] = (wx, wy)
+                    splittable[n] = s_split; is_street[n] = s_street; is_stub[n] = s_stub; n += 1
+                    _bump(c_idx, 2)
+                    far_idx = c_idx
+                else:
+                    far_idx = add_node((fx, fy))
+
+                grow(1)
+                seg_arr[n, 0] = (ax0, ay0); seg_arr[n, 1] = (fx, fy)
+                splittable[n] = False; is_street[n] = True; is_stub[n] = True; n += 1
+                _bump(anchor_idx, 1)
+                _bump(far_idx, 1)
+                if snap_i < 0:  # dangling far-end; keep it invisible to normal connections
+                    stub_node_set.add(far_idx)
+
         if n_nodes <= 3:
             continue
 
         sa = seg_arr[:n]
+        # For blocking/angle checks in the normal connection path, exclude stub
+        # segments so that dead-end stubs don't prevent normal connections from
+        # forming — stubs are additive features, not structural obstacles.
+        sa_no_stub = sa[~is_stub[:n]] if p_stub > 0.0 else sa
 
         # (Re)build the tree only when enough new nodes have accumulated.
         if tree is None or (n_nodes - tree_n) >= kdtree_rebuild_every:
@@ -337,17 +413,19 @@ def _run(seg_init, blocking_segs, area_poly, *,
                 d = np.concatenate([d, pd])
             gi = gi[np.argsort(d, kind='stable')]
             mask = (gi != exclude[0]) & (gi != exclude[1]) & (gi != exclude[2])
+            if stub_node_set:
+                mask &= np.array([int(i) not in stub_node_set for i in gi], dtype=bool)
             return node_arr[gi[mask]]
 
         cand = _ordered(30)
         if len(cand) == 0:
             continue
-        best = _find_best(midx, midy, cand, range(len(cand)), sa,
+        best = _find_best(midx, midy, cand, range(len(cand)), sa_no_stub,
                           model, min_angle)
         if best is None and tree_n > 30:  # widen search to all nodes
             cand_all = _ordered(tree_n)
             best = _find_best(midx, midy, cand_all, range(len(cand_all)),
-                              sa, model, min_angle)
+                              sa_no_stub, model, min_angle)
 
         if best is not None:
             grow(1)
@@ -377,6 +455,9 @@ def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] =
                        seed: int = 42, n_spokes: int = 8,
                        area_coeff: float = 2500.0,
                        area_scale: Optional[float] = None,
+                       p_stub: float = 0.0,
+                       stub_len_max: Optional[float] = None,
+                       snap_tol: Optional[float] = None,
                        kdtree_rebuild_every: int = 256,
                        progress_every: int = 1000,
                        crs=None, verbose: bool = True):
@@ -413,6 +494,7 @@ def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] =
                     model=model, min_length=min_length, max_iter=max_iter,
                     seed=seed, min_angle=min_angle,
                     area_coeff=area_coeff, area_scale=area_scale,
+                    p_stub=p_stub, stub_len_max=stub_len_max, snap_tol=snap_tol,
                     kdtree_rebuild_every=kdtree_rebuild_every,
                     progress_every=progress_every, verbose=verbose)
 

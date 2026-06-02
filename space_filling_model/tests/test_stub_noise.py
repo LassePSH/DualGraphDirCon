@@ -66,3 +66,58 @@ def test_nearest_segment_excludes_anchor_edges():
     i, fx, fy = _nearest_segment(5.0, 1.0, seg, max_dist=2.0,
                                  exclude_xy=(0.0, 0.0))
     assert i == -1
+
+
+def test_p_stub_zero_is_identical():
+    """p_stub=0.0 must reproduce the baseline geometry exactly."""
+    res = run_circular_model(p_stub=0.0, **BASE_KW)
+    assert len(res['segments']) == 3728
+    assert _geom_hash(res['segments']) == '913fac0a0326c33b'
+
+
+def test_stubs_add_low_degree_deadends():
+    """Turning on stubs must raise the count of degree-1 dead-end nodes."""
+    base = run_circular_model(p_stub=0.0, **BASE_KW)['segments']
+    noisy = run_circular_model(p_stub=0.3, **BASE_KW)['segments']
+
+    base_deg1 = sum(1 for v in _degree_counter(base).values() if v == 1)
+    noisy_deg1 = sum(1 for v in _degree_counter(noisy).values() if v == 1)
+
+    assert noisy_deg1 > base_deg1
+
+
+def test_stub_len_max_bounds_new_deadends():
+    """Tightening stub_len_max must not create short dead-ends longer than the
+    bound. We compare against the baseline so pre-existing long degree-1
+    endpoints (boundary spokes) are excluded."""
+    stub_len_max = 150.0
+
+    def short_deadend_lengths(segments):
+        counter = _degree_counter(segments)
+        out = []
+        for a, b in segments:
+            ka = (round(a[0], 6), round(a[1], 6))
+            kb = (round(b[0], 6), round(b[1], 6))
+            if counter[ka] == 1 or counter[kb] == 1:
+                out.append(float(np.hypot(b[0] - a[0], b[1] - a[1])))
+        return out
+
+    base = short_deadend_lengths(run_circular_model(p_stub=0.0, **BASE_KW)['segments'])
+    noisy = short_deadend_lengths(
+        run_circular_model(p_stub=0.3, stub_len_max=stub_len_max, **BASE_KW)['segments'])
+
+    base_short = sum(1 for L in base if L <= stub_len_max + 1e-6)
+    noisy_short = sum(1 for L in noisy if L <= stub_len_max + 1e-6)
+    assert noisy_short > base_short
+    for L in noisy:
+        if L <= stub_len_max + 1e-6:
+            continue  # within bound
+        # Any dead-end longer than the bound must already exist at baseline
+        # (e.g. boundary spokes), not be a freshly minted stub.
+        assert any(abs(L - Lb) < 1e-6 for Lb in base)
+
+
+def test_reproducible_with_seed():
+    a = run_circular_model(p_stub=0.3, **BASE_KW)['segments']
+    b = run_circular_model(p_stub=0.3, **BASE_KW)['segments']
+    assert _geom_hash(a) == _geom_hash(b)
