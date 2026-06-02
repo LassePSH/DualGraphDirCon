@@ -75,46 +75,63 @@ def test_p_stub_zero_is_identical():
     assert _geom_hash(res['segments']) == '913fac0a0326c33b'
 
 
-def test_stubs_add_low_degree_deadends():
-    """Turning on stubs must raise the count of degree-1 dead-end nodes."""
+def _deadend_seg_lengths(segments):
+    """Lengths of every segment that has at least one degree-1 (dead-end)
+    endpoint."""
+    c = _degree_counter(segments)
+    out = []
+    for a, b in segments:
+        ka = (round(a[0], 6), round(a[1], 6))
+        kb = (round(b[0], 6), round(b[1], 6))
+        if c[ka] == 1 or c[kb] == 1:
+            out.append(float(np.hypot(b[0] - a[0], b[1] - a[1])))
+    return out
+
+
+def test_stubs_are_additive():
+    """Stubs are an additive layer, so enabling them adds segments, and more
+    segments accrue as p_stub rises."""
+    n0 = len(run_circular_model(p_stub=0.0, **BASE_KW)['segments'])
+    n_lo = len(run_circular_model(p_stub=0.1, **BASE_KW)['segments'])
+    n_hi = len(run_circular_model(p_stub=0.3, **BASE_KW)['segments'])
+    assert n0 < n_lo < n_hi
+
+
+def test_stubs_dangle_as_culdesacs_when_snap_tol_small():
+    """With a tiny snap_tol a stub free end cannot T into a nearby street, so it
+    dangles as a degree-1 cul-de-sac and raises the degree-1 node count."""
     base = run_circular_model(p_stub=0.0, **BASE_KW)['segments']
-    noisy = run_circular_model(p_stub=0.3, **BASE_KW)['segments']
+    noisy = run_circular_model(p_stub=0.3, snap_tol=1.0, **BASE_KW)['segments']
 
     base_deg1 = sum(1 for v in _degree_counter(base).values() if v == 1)
     noisy_deg1 = sum(1 for v in _degree_counter(noisy).values() if v == 1)
-
     assert noisy_deg1 > base_deg1
 
 
-def test_stub_len_max_bounds_new_deadends():
-    """Tightening stub_len_max must not create short dead-ends longer than the
-    bound. We compare against the baseline so pre-existing long degree-1
-    endpoints (boundary spokes) are excluded."""
-    stub_len_max = 150.0
+def test_stubs_tee_in_as_degree2_with_default_snap_tol():
+    """In a dense domain (default snap_tol) stub free ends snap onto nearby
+    streets, creating degree-2 junctions — populating the low-degree shoulder."""
+    base = run_circular_model(p_stub=0.0, **BASE_KW)['segments']
+    noisy = run_circular_model(p_stub=0.3, **BASE_KW)['segments']
 
-    def short_deadend_lengths(segments):
-        counter = _degree_counter(segments)
-        out = []
-        for a, b in segments:
-            ka = (round(a[0], 6), round(a[1], 6))
-            kb = (round(b[0], 6), round(b[1], 6))
-            if counter[ka] == 1 or counter[kb] == 1:
-                out.append(float(np.hypot(b[0] - a[0], b[1] - a[1])))
-        return out
+    base_deg2 = sum(1 for v in _degree_counter(base).values() if v == 2)
+    noisy_deg2 = sum(1 for v in _degree_counter(noisy).values() if v == 2)
+    assert noisy_deg2 > base_deg2
 
-    base = short_deadend_lengths(run_circular_model(p_stub=0.0, **BASE_KW)['segments'])
-    noisy = short_deadend_lengths(
-        run_circular_model(p_stub=0.3, stub_len_max=stub_len_max, **BASE_KW)['segments'])
 
-    base_short = sum(1 for L in base if L <= stub_len_max + 1e-6)
-    noisy_short = sum(1 for L in noisy if L <= stub_len_max + 1e-6)
-    assert noisy_short > base_short
-    for L in noisy:
-        if L <= stub_len_max + 1e-6:
-            continue  # within bound
-        # Any dead-end longer than the bound must already exist at baseline
-        # (e.g. boundary spokes), not be a freshly minted stub.
-        assert any(abs(L - Lb) < 1e-6 for Lb in base)
+def test_stub_length_respects_stub_len_max():
+    """Dangling stubs (forced via a tiny snap_tol) never exceed stub_len_max,
+    and some are longer than the baseline's longest dead-end — confirming the
+    bound scales stub length rather than being coincidentally satisfied."""
+    stub_len_max = 200.0
+    base = run_circular_model(p_stub=0.0, **BASE_KW)['segments']
+    noisy = run_circular_model(p_stub=0.3, snap_tol=1.0,
+                               stub_len_max=stub_len_max, **BASE_KW)['segments']
+
+    base_max = max(_deadend_seg_lengths(base))
+    noisy_max = max(_deadend_seg_lengths(noisy))
+    assert noisy_max <= stub_len_max + 1e-6
+    assert noisy_max > base_max + 1e-6
 
 
 def test_reproducible_with_seed():

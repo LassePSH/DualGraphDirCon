@@ -164,9 +164,11 @@ def _run(seg_init, blocking_segs, area_poly, *,
          kdtree_rebuild_every=256, progress_every=0, verbose=True):
     """Core loop. `seg_init` are splittable seeds; `blocking_segs` are not."""
     rng = np.random.default_rng(seed)
-    # Separate RNG for stubs so that the main RNG stream — which drives segment
-    # selection and normal connections — is unchanged whether or not p_stub>0.
-    # This guarantees that enabling stubs never degrades the base topology.
+    # Separate RNG for stubs so the main RNG stream (segment selection and
+    # normal connections) is identical regardless of p_stub; stubs are then a
+    # reproducible additive layer. Placed stubs DO block later connections
+    # (the network stays planar), so the resulting backbone can differ slightly
+    # from the p_stub=0 case even though the RNG draws match.
     stub_rng = np.random.default_rng(seed ^ 0xDEADBEEF) if p_stub > 0.0 else None
     if stub_len_max is None:
         stub_len_max = 3.0 * min_length
@@ -179,7 +181,6 @@ def _run(seg_init, blocking_segs, area_poly, *,
     seg_arr = np.empty((capacity, 2, 2), dtype=np.float64)
     splittable = np.zeros(capacity, dtype=bool)
     is_street = np.zeros(capacity, dtype=bool)
-    is_stub = np.zeros(capacity, dtype=bool)  # True for stub segments (dead-end additions)
 
     for i, (a, b) in enumerate(seg_init):
         seg_arr[i, 0] = a; seg_arr[i, 1] = b
@@ -224,7 +225,7 @@ def _run(seg_init, blocking_segs, area_poly, *,
             deg3_idx.append(int(idx))
 
     def grow(extra):
-        nonlocal seg_arr, splittable, is_street, is_stub
+        nonlocal seg_arr, splittable, is_street
         if n + extra <= seg_arr.shape[0]:
             return
         new_cap = max(seg_arr.shape[0] * 2, n + extra)
@@ -237,9 +238,6 @@ def _run(seg_init, blocking_segs, area_poly, *,
         new_st = np.zeros(new_cap, dtype=bool)
         new_st[:n] = is_street[:n]
         is_street = new_st
-        new_sb = np.zeros(new_cap, dtype=bool)
-        new_sb[:n] = is_stub[:n]
-        is_stub = new_sb
 
     for a, b in seg_init:
         ia = add_node(a); ib = add_node(b); _bump(ia, 1); _bump(ib, 1)
@@ -354,18 +352,16 @@ def _run(seg_init, blocking_segs, area_poly, *,
                     wx, wy = seg_arr[snap_i, 1]
                     s_split = splittable[snap_i]
                     s_street = is_street[snap_i]
-                    s_stub = is_stub[snap_i]
                     grow(2)
                     seg_arr[snap_i] = seg_arr[n - 1]
                     splittable[snap_i] = splittable[n - 1]
                     is_street[snap_i] = is_street[n - 1]
-                    is_stub[snap_i] = is_stub[n - 1]
                     n -= 1
                     c_idx = add_node((fx, fy))
                     seg_arr[n, 0] = (ux, uy); seg_arr[n, 1] = (fx, fy)
-                    splittable[n] = s_split; is_street[n] = s_street; is_stub[n] = s_stub; n += 1
+                    splittable[n] = s_split; is_street[n] = s_street; n += 1
                     seg_arr[n, 0] = (fx, fy); seg_arr[n, 1] = (wx, wy)
-                    splittable[n] = s_split; is_street[n] = s_street; is_stub[n] = s_stub; n += 1
+                    splittable[n] = s_split; is_street[n] = s_street; n += 1
                     _bump(c_idx, 2)
                     far_idx = c_idx
                 else:
@@ -373,20 +369,16 @@ def _run(seg_init, blocking_segs, area_poly, *,
 
                 grow(1)
                 seg_arr[n, 0] = (ax0, ay0); seg_arr[n, 1] = (fx, fy)
-                splittable[n] = False; is_street[n] = True; is_stub[n] = True; n += 1
+                splittable[n] = False; is_street[n] = True; n += 1
                 _bump(anchor_idx, 1)
                 _bump(far_idx, 1)
-                if snap_i < 0:  # dangling far-end; keep it invisible to normal connections
-                    stub_node_set.add(far_idx)
+                if snap_i < 0:  # dangling tip: never let a normal connection
+                    stub_node_set.add(far_idx)  # target it (keeps the cul-de-sac)
 
         if n_nodes <= 3:
             continue
 
         sa = seg_arr[:n]
-        # For blocking/angle checks in the normal connection path, exclude stub
-        # segments so that dead-end stubs don't prevent normal connections from
-        # forming — stubs are additive features, not structural obstacles.
-        sa_no_stub = sa[~is_stub[:n]] if p_stub > 0.0 else sa
 
         # (Re)build the tree only when enough new nodes have accumulated.
         if tree is None or (n_nodes - tree_n) >= kdtree_rebuild_every:
@@ -420,12 +412,12 @@ def _run(seg_init, blocking_segs, area_poly, *,
         cand = _ordered(30)
         if len(cand) == 0:
             continue
-        best = _find_best(midx, midy, cand, range(len(cand)), sa_no_stub,
+        best = _find_best(midx, midy, cand, range(len(cand)), sa,
                           model, min_angle)
         if best is None and tree_n > 30:  # widen search to all nodes
             cand_all = _ordered(tree_n)
             best = _find_best(midx, midy, cand_all, range(len(cand_all)),
-                              sa_no_stub, model, min_angle)
+                              sa, model, min_angle)
 
         if best is not None:
             grow(1)
