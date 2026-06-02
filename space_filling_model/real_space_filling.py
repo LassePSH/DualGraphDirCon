@@ -329,8 +329,10 @@ def _run(seg_init, blocking_segs, area_poly, *,
         b_idx = node_keys[nkey((bx, by))]
         _bump(m_idx, 2)  # midpoint now carries the two halves
 
-        # --- branch-or-stub: occasionally emit a dead-end stub instead of the
-        # usual nearest-visible connection. Stubs are streets but never split. ---
+        # --- additive stub: occasionally also emit a dead-end stub from this
+        # iteration's midpoint (or a random intersection). The normal connection
+        # below still runs; placed stubs are streets but never split, and they
+        # do block later connections (the network stays planar). ---
         if p_stub > 0.0 and stub_rng.random() < p_stub:
             use_mid = (len(deg3_idx) == 0) or (stub_rng.random() < 0.5)
             anchor_idx = m_idx if use_mid else \
