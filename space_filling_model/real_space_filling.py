@@ -1,50 +1,44 @@
 #!/usr/bin/env python3
 """
-Real-area space-filling street network model.
+Real-area space-filling street network model (circular domain).
 
-Wraps `space_filling.run_model` so that the unit-square domain is replaced by
-the convex hull of a cached OSM city graph (in local UTM metres), and any
-proposed edge that would cross water, coastline, or the area boundary is
-rejected.
+Wraps `space_filling.run_model` so that the unit-square domain is replaced by a
+circular area in local UTM metres. The circle's area matches the convex-hull
+area of a cached OSM city graph (if a `city` is given) or an explicit
+`area_m2`. This lets model parameters be compared in metres against real-city
+sizes without any coastline/water confounds.
 
-Two init modes:
-  * "spokes" — area boundary + N lines from the centroid to the boundary
-    (analogue of the unit-square + diagonals init).
-  * "roads"  — boundary + the major roads (primary/trunk/secondary by default)
-    extracted from the real OSM graph.
+Init is "spokes": the circle boundary plus N lines from the centre to the
+boundary (analogue of the unit-square + diagonals init).
 
-Forbidden geometry (water, waterways, coastline) is fetched once via osmnx and
-cached as a GeoPackage in `data/city_water/<city>.gpkg`.
-s
-Geometry units throughout the public API are metres (local UTM CRS chosen by
-`osmnx.project_graph`). Defaults: `min_length=50` m, `min_angle=π/4`.
+Geometry units throughout the public API are metres. The returned GeoDataFrame
+is always georeferenced: when a `city` is given its local UTM CRS is used,
+otherwise the CRS defaults to EPSG:32632 (UTM zone 32N). Defaults:
+`min_length=50` m, `min_angle=π/4`.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-import warnings
-from typing import Optional, Sequence
+from typing import Optional
 
 import geopandas as gpd
 import numpy as np
 import osmnx as ox
-import pandas as pd
 from scipy.spatial import cKDTree
-from shapely.geometry import LineString, MultiLineString, Point, Polygon
-from shapely.ops import unary_union
-from shapely.prepared import prep
-from shapely.strtree import STRtree
+from shapely.geometry import LineString, Point, Polygon
 
 sys.path.insert(0, os.path.dirname(__file__))
 from space_filling import (  # noqa: E402  reuse hot inner loops
-    _connection_ok,
     _find_best,
     _segment_blocks,
     _min_incident_angle,
     EPS,
 )
+
+# Default CRS for an abstract circle that has no real-world location.
+DEFAULT_CRS = 'EPSG:32632'  # UTM zone 32N (metres)
 
 
 def nkey(p, decimals=6):
@@ -53,20 +47,10 @@ def nkey(p, decimals=6):
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 GRAPH_DIR = os.path.join(REPO_ROOT, 'data', 'city_graphs')
-WATER_DIR = os.path.join(REPO_ROOT, 'data', 'city_water')
-
-WATER_TAGS = {
-    'natural': ['water', 'coastline', 'bay', 'strait'],
-    'waterway': True,
-    'water': True,
-    'landuse': ['reservoir', 'basin'],
-}
-
-DEFAULT_HIGHWAY_TAGS = ('motorway', 'trunk', 'primary', 'secondary')
 
 
 # --------------------------------------------------------------------------- #
-# Area + water fetch                                                          #
+# Area construction                                                           #
 # --------------------------------------------------------------------------- #
 
 def _city_safe_name(city: str) -> str:
@@ -102,85 +86,8 @@ def area_polygon_from_graph(G_proj) -> Polygon:
     return hull
 
 
-def _consolidate_water(gdf: gpd.GeoDataFrame, *, min_area_m2: float = 500.0,
-                       simplify_tol_m: float = 5.0,
-                       waterway_buffer_m: float = 3.0) -> gpd.GeoDataFrame:
-    """Merge raw OSM water features into a small set of (multi)polygons.
-
-    * Buffers waterway/coastline lines so they have non-zero width.
-    * Drops polygons below `min_area_m2`.
-    * Simplifies remaining polygons by `simplify_tol_m`.
-    * Unions everything and returns a GeoDataFrame with one row per polygon.
-    """
-    if len(gdf) == 0:
-        return gdf
-    polys = []
-    for geom in gdf.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        gt = geom.geom_type
-        if gt in ('Polygon', 'MultiPolygon'):
-            polys.append(geom)
-        elif gt in ('LineString', 'MultiLineString'):
-            polys.append(geom.buffer(waterway_buffer_m))
-    if not polys:
-        return gdf.iloc[0:0]
-    merged = unary_union(polys)
-    # split MultiPolygon into parts, filter small ones, simplify
-    parts = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
-    keep = [p.simplify(simplify_tol_m, preserve_topology=True)
-            for p in parts if p.area >= min_area_m2]
-    return gpd.GeoDataFrame({'geometry': keep}, geometry='geometry', crs=gdf.crs)
-
-
-def fetch_water(area_poly_proj: Polygon, crs_proj, *, cache_path: Optional[str],
-                min_area_m2: float = 500.0, simplify_tol_m: float = 5.0) -> gpd.GeoDataFrame:
-    """Fetch water-like OSM features inside the area polygon.
-
-    Returns a GeoDataFrame in `crs_proj` containing polygon and line geometries
-    that mark forbidden boundaries. Cached to `cache_path` if given.
-    """
-    if cache_path and os.path.exists(cache_path):
-        return gpd.read_file(cache_path)
-
-    # osmnx wants WGS84 polygon for features_from_polygon
-    area_wgs = gpd.GeoSeries([area_poly_proj], crs=crs_proj).to_crs(4326).iloc[0]
-    try:
-        feats = ox.features_from_polygon(area_wgs, tags=WATER_TAGS)
-    except Exception as e:
-        warnings.warn(f'water fetch failed: {e}; assuming no water')
-        feats = gpd.GeoDataFrame(geometry=[], crs=4326)
-
-    if len(feats) == 0:
-        out = gpd.GeoDataFrame(geometry=[], crs=crs_proj)
-    else:
-        out = feats.to_crs(crs_proj)[['geometry']].copy()
-        out = out[out.geometry.intersects(area_poly_proj)].copy()
-        out['geometry'] = out.geometry.intersection(area_poly_proj)
-        out = out[~out.geometry.is_empty]
-        out = _consolidate_water(out, min_area_m2=min_area_m2,
-                                 simplify_tol_m=simplify_tol_m)
-
-    if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        if len(out):
-            out.to_file(cache_path, driver='GPKG')
-        else:
-            # write an empty marker so we don't refetch
-            gpd.GeoDataFrame({'geometry': [area_poly_proj.centroid]},
-                             geometry='geometry', crs=crs_proj).to_file(
-                cache_path, driver='GPKG')
-    return out
-
-
-def load_or_fetch_water(city: str, G_proj, area_poly_proj: Polygon,
-                       use_cache: bool = True) -> gpd.GeoDataFrame:
-    cache = os.path.join(WATER_DIR, _city_safe_name(city) + '.gpkg') if use_cache else None
-    return fetch_water(area_poly_proj, G_proj.graph['crs'], cache_path=cache)
-
-
 # --------------------------------------------------------------------------- #
-# Blocking segments (area boundary + water)                                   #
+# Blocking segments (area boundary)                                           #
 # --------------------------------------------------------------------------- #
 
 def _polygon_boundary_segments(poly):
@@ -194,125 +101,25 @@ def _polygon_boundary_segments(poly):
             yield (coords[i][:2], coords[i + 1][:2])
 
 
-def _linestring_segments(line):
-    coords = list(line.coords)
-    for i in range(len(coords) - 1):
-        yield (coords[i][:2], coords[i + 1][:2])
-
-
 def boundary_segments(area_poly: Polygon) -> list:
-    """Non-splittable blocking segments for the outer area boundary only.
-
-    Water blocking is enforced separately via shapely (see `_make_water_check`)
-    because OSM water can have tens of thousands of vertices and an O(N)
-    crossing test against all of them is too slow.
-    """
+    """Non-splittable blocking segments for the outer area boundary."""
     return list(_polygon_boundary_segments(area_poly))
 
 
-def _make_water_check(water_gdf: gpd.GeoDataFrame):
-    """Return a `crosses_water(a, b) -> bool` predicate.
-
-    Uses a prepared union of all water polygons + `line.difference(union)` so
-    that a segment which has *any* portion strictly inside water is rejected,
-    even when individual-polygon tests would only see touch points.
-    Returns `None` if there is no water.
-    """
-    if water_gdf is None or len(water_gdf) == 0:
-        return None
-    geoms = [g for g in water_gdf.geometry if g is not None and not g.is_empty]
-    if not geoms:
-        return None
-    water_union = unary_union(geoms)
-    prep_union = prep(water_union)
-    tol = 1e-3  # 1 mm — well below any meaningful street resolution
-
-    def crosses_water(a, b) -> bool:
-        ln = LineString([a, b])
-        if not prep_union.intersects(ln):
-            return False
-        # Any part of the line clipped away by water means it crossed water.
-        return ln.difference(water_union).length < ln.length - tol
-
-    return crosses_water
-
-
 # --------------------------------------------------------------------------- #
-# Initialisation modes                                                        #
+# Initialisation                                                              #
 # --------------------------------------------------------------------------- #
 
-def _land_polygon(area_poly: Polygon, water_gdf: gpd.GeoDataFrame):
-    if water_gdf is None or len(water_gdf) == 0:
-        return area_poly
-    water_union = unary_union(list(water_gdf.geometry))
-    land = area_poly.difference(water_union)
-    return land if not land.is_empty else area_poly
-
-
-def init_spokes(area_poly: Polygon, land_poly, n_spokes: int = 8,
-                crosses_water=None) -> list:
-    """Centroid → boundary spokes, clipped at the first water intersection."""
-    c = land_poly.representative_point()
+def init_spokes(area_poly: Polygon, n_spokes: int = 8) -> list:
+    """Centre → boundary spokes."""
+    c = area_poly.representative_point()
     cx, cy = c.x, c.y
-
     boundary = area_poly.exterior
     out = []
     for i in range(n_spokes):
         t = i / n_spokes
         p = boundary.interpolate(t, normalized=True)
-        if crosses_water is None or not crosses_water((cx, cy), (p.x, p.y)):
-            out.append(((cx, cy), (p.x, p.y)))
-            continue
-        # Clip the spoke at the first water boundary intersection: find the
-        # furthest point along centroid→p that stays on land.
-        ln = LineString([(cx, cy), (p.x, p.y)])
-        clipped = ln.intersection(land_poly)
-        if clipped.is_empty:
-            continue
-        if clipped.geom_type == 'MultiLineString':
-            # take the piece containing the centroid (if any), else the longest
-            pieces = list(clipped.geoms)
-            near = [g for g in pieces if g.distance(c) < 1e-3]
-            ln_use = near[0] if near else max(pieces, key=lambda g: g.length)
-        else:
-            ln_use = clipped
-        if ln_use.length < 1.0:
-            continue
-        coords = list(ln_use.coords)
-        out.append((coords[0][:2], coords[-1][:2]))
-    return out
-
-
-def init_from_roads(G_proj, area_poly: Polygon, land_poly,
-                    highway_tags: Sequence[str] = DEFAULT_HIGHWAY_TAGS) -> list:
-    """Edges from the projected OSM graph whose highway tag is in `highway_tags`,
-    clipped to land (= area minus water)."""
-    out = []
-    for u, v, data in G_proj.edges(data=True):
-        hw = data.get('highway')
-        if isinstance(hw, list):
-            hit = any(h in highway_tags for h in hw)
-        else:
-            hit = hw in highway_tags
-        if not hit:
-            continue
-        geom = data.get('geometry')
-        if geom is None:
-            ux, uy = G_proj.nodes[u]['x'], G_proj.nodes[u]['y']
-            vx, vy = G_proj.nodes[v]['x'], G_proj.nodes[v]['y']
-            geom = LineString([(ux, uy), (vx, vy)])
-        if not geom.intersects(land_poly):
-            continue
-        clipped = geom.intersection(land_poly)
-        if clipped.geom_type == 'LineString':
-            lns = [clipped]
-        elif clipped.geom_type == 'MultiLineString':
-            lns = list(clipped.geoms)
-        else:
-            continue
-        for ln in lns:
-            for a, b in _linestring_segments(ln):
-                out.append((a, b))
+        out.append(((cx, cy), (p.x, p.y)))
     return out
 
 
@@ -320,19 +127,7 @@ def init_from_roads(G_proj, area_poly: Polygon, land_poly,
 # Main simulation (real-area variant)                                         #
 # --------------------------------------------------------------------------- #
 
-def _find_best_water_safe(mx, my, candidates, idxs, seg_arr, model, min_angle,
-                          check_water):
-    for idx in idxs:
-        tx, ty = candidates[idx]
-        if not _connection_ok(mx, my, tx, ty, seg_arr, model, min_angle):
-            continue
-        if not check_water((float(tx), float(ty))):
-            continue
-        return (float(tx), float(ty))
-    return None
-
-
-def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
+def _run(seg_init, blocking_segs, area_poly, *,
          model=1, min_length=50.0, max_iter=200_000, seed=42,
          min_angle=np.pi / 4, area_coeff=2500.0, area_scale=None,
          kdtree_rebuild_every=256, progress_every=0, verbose=True):
@@ -408,7 +203,7 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
         ia = add_node(a); ib = add_node(b); _bump(ia, 1); _bump(ib, 1)
 
     # area-bias centring (model 2): use mean of initial seed nodes as a proxy
-    # for the network centre (works whether seeds came from spokes or roads).
+    # for the network centre.
     if n_init > 0:
         seed_pts = np.array([list(p) for ab in seg_init for p in ab])
         cx, cy = float(seed_pts[:, 0].mean()), float(seed_pts[:, 1].mean())
@@ -514,18 +309,15 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
             mask = (gi != exclude[0]) & (gi != exclude[1]) & (gi != exclude[2])
             return node_arr[gi[mask]]
 
-        def _check(b):
-            return crosses_water is None or not crosses_water((midx, midy), b)
-
         cand = _ordered(30)
         if len(cand) == 0:
             continue
-        best = _find_best_water_safe(midx, midy, cand, range(len(cand)), sa,
-                                     model, min_angle, _check)
+        best = _find_best(midx, midy, cand, range(len(cand)), sa,
+                          model, min_angle)
         if best is None and tree_n > 30:  # widen search to all nodes
             cand_all = _ordered(tree_n)
-            best = _find_best_water_safe(midx, midy, cand_all, range(len(cand_all)),
-                                         sa, model, min_angle, _check)
+            best = _find_best(midx, midy, cand_all, range(len(cand_all)),
+                              sa, model, min_angle)
 
         if best is not None:
             grow(1)
@@ -549,66 +341,6 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
             for i in range(n) if is_street[i]]
 
 
-def run_real_model(city: str, *, init: str = 'spokes', model: int = 1,
-                   min_length: float = 50.0, min_angle: float = np.pi / 4,
-                   max_iter: int = 200_000, seed: int = 42,
-                   n_spokes: int = 8,
-                   highway_tags: Sequence[str] = DEFAULT_HIGHWAY_TAGS,
-                   area_coeff: float = 2500.0,
-                   area_scale: Optional[float] = None,
-                   kdtree_rebuild_every: int = 256,
-                   use_water_cache: bool = True,
-                   verbose: bool = True):
-    """Run the real-area space-filling model for `city`.
-
-    Returns
-    -------
-    dict with keys:
-        segments      : list of ((x1,y1),(x2,y2)) in the local UTM CRS.
-        area_polygon  : shapely Polygon (UTM metres).
-        water         : GeoDataFrame of water features (UTM metres).
-        crs           : pyproj CRS of the UTM projection.
-    """
-    if init not in ('spokes', 'roads'):
-        raise ValueError(f'init must be "spokes" or "roads", got {init!r}')
-
-    G_proj = load_city_graph(city)
-    crs = G_proj.graph['crs']
-    area = area_polygon_from_graph(G_proj)
-    water = load_or_fetch_water(city, G_proj, area, use_cache=use_water_cache)
-    land = _land_polygon(area, water)
-    crosses_water = _make_water_check(water)
-
-    if init == 'spokes':
-        seeds = init_spokes(area, land, n_spokes=n_spokes,
-                            crosses_water=crosses_water)
-    else:
-        seeds = init_from_roads(G_proj, area, land, highway_tags=highway_tags)
-        if not seeds:
-            warnings.warn('no major roads found in area; falling back to spokes')
-            seeds = init_spokes(area, land, n_spokes=n_spokes,
-                                crosses_water=crosses_water)
-
-    blockers = boundary_segments(area)
-
-    segments = _run(seeds, blockers, area,
-                    crosses_water=crosses_water,
-                    model=model, min_length=min_length, max_iter=max_iter,
-                    seed=seed, min_angle=min_angle,
-                    area_coeff=area_coeff, area_scale=area_scale,
-                    kdtree_rebuild_every=kdtree_rebuild_every, verbose=verbose)
-
-    return {
-        'segments': segments,
-        'area_polygon': area,
-        'land_polygon': land,
-        'water': water,
-        'crs': crs,
-        'init': init,
-        'model': model,
-    }
-
-
 def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] = None,
                        model: int = 1, min_length: float = 50.0,
                        min_angle: float = np.pi / 4, max_iter: int = 200_000,
@@ -618,11 +350,19 @@ def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] =
                        kdtree_rebuild_every: int = 256,
                        progress_every: int = 1000,
                        crs=None, verbose: bool = True):
-    """Run the space-filling model on a plain circular domain (no water).
+    """Run the space-filling model on a plain circular domain.
 
     The circle's area matches the convex-hull area of `city` (if given) or the
     explicit `area_m2`. Useful for comparing model parameters in metres against
     real-city parameters without confounds from coastline geometry.
+
+    Returns
+    -------
+    dict with keys:
+        segments      : list of ((x1,y1),(x2,y2)) in metres.
+        area_polygon  : shapely Polygon (metres).
+        crs           : CRS of the geometry (never None).
+        init, model, area_m2.
     """
     if area_m2 is None:
         if city is None:
@@ -632,12 +372,14 @@ def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] =
         if crs is None:
             crs = G_proj.graph['crs']
 
+    if crs is None:
+        crs = DEFAULT_CRS
+
     area = circular_area_polygon(area_m2)
-    land = area
-    seeds = init_spokes(area, land, n_spokes=n_spokes, crosses_water=None)
+    seeds = init_spokes(area, n_spokes=n_spokes)
     blockers = boundary_segments(area)
 
-    segments = _run(seeds, blockers, area, crosses_water=None,
+    segments = _run(seeds, blockers, area,
                     model=model, min_length=min_length, max_iter=max_iter,
                     seed=seed, min_angle=min_angle,
                     area_coeff=area_coeff, area_scale=area_scale,
@@ -647,8 +389,6 @@ def run_circular_model(city: Optional[str] = None, *, area_m2: Optional[float] =
     return {
         'segments': segments,
         'area_polygon': area,
-        'land_polygon': land,
-        'water': gpd.GeoDataFrame(geometry=[], crs=crs),
         'crs': crs,
         'init': 'spokes',
         'model': model,
@@ -688,14 +428,13 @@ def to_geodataframe(result: dict, model_id: Optional[int] = None) -> gpd.GeoData
 # --------------------------------------------------------------------------- #
 
 if __name__ == '__main__':
-    city = sys.argv[1] if len(sys.argv) > 1 else 'Copenhagen,_Denmark'
-    print(f'=== Real space-filling model: {city} ===')
-    for init in ('spokes', 'roads'):
-        for model in (1, 2):
-            print(f'\n[{init}, model {model}]')
-            res = run_real_model(city, init=init, model=model,
+    area_m2 = np.pi * 500.0 ** 2
+    print(f'=== Circular space-filling model: area={area_m2:.0f} m^2 ===')
+    for model in (1, 2):
+        print(f'\n[model {model}]')
+        res = run_circular_model(area_m2=area_m2, model=model,
                                  min_length=80.0, max_iter=20_000, seed=42)
-            gdf = to_geodataframe(res, model_id=model)
-            out = f'real_{_city_safe_name(city)}_{init}_m{model}.gpkg'
-            gdf.to_file(out, driver='GPKG')
-            print(f'  wrote {out} ({len(gdf)} segments)')
+        gdf = to_geodataframe(res, model_id=model)
+        out = f'circular_m{model}.gpkg'
+        gdf.to_file(out, driver='GPKG')
+        print(f'  wrote {out} ({len(gdf)} segments, crs={gdf.crs})')
