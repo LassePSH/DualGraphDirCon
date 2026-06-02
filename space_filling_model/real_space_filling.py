@@ -127,6 +127,36 @@ def init_spokes(area_poly: Polygon, n_spokes: int = 8) -> list:
 # Main simulation (real-area variant)                                         #
 # --------------------------------------------------------------------------- #
 
+def _nearest_segment(fx, fy, seg_arr, max_dist, exclude_xy=None):
+    """Nearest segment to point (fx,fy) within `max_dist`.
+
+    Returns (idx, foot_x, foot_y): the index into `seg_arr` of the closest
+    segment and the foot of the perpendicular from the point onto it. If no
+    segment lies within `max_dist`, returns (-1, fx, fy). Segments sharing the
+    `exclude_xy` endpoint (the stub anchor) are never selected.
+    """
+    if seg_arr.shape[0] == 0:
+        return -1, fx, fy
+    ax = seg_arr[:, 0, 0]; ay = seg_arr[:, 0, 1]
+    bx = seg_arr[:, 1, 0]; by = seg_arr[:, 1, 1]
+    dx = bx - ax; dy = by - ay
+    L2 = dx * dx + dy * dy
+    L2 = np.where(L2 < EPS, EPS, L2)
+    t = ((fx - ax) * dx + (fy - ay) * dy) / L2
+    t = np.clip(t, 0.0, 1.0)
+    projx = ax + t * dx; projy = ay + t * dy
+    dist = np.hypot(projx - fx, projy - fy)
+    if exclude_xy is not None:
+        ex, ey = exclude_xy
+        share = (((np.abs(ax - ex) < EPS) & (np.abs(ay - ey) < EPS)) |
+                 ((np.abs(bx - ex) < EPS) & (np.abs(by - ey) < EPS)))
+        dist = np.where(share, np.inf, dist)
+    i = int(np.argmin(dist))
+    if dist[i] <= max_dist:
+        return i, float(projx[i]), float(projy[i])
+    return -1, fx, fy
+
+
 def _run(seg_init, blocking_segs, area_poly, *,
          model=1, min_length=50.0, max_iter=200_000, seed=42,
          min_angle=np.pi / 4, area_coeff=2500.0, area_scale=None,

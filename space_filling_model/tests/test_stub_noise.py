@@ -38,3 +38,31 @@ def test_baseline_geometry_unchanged():
     segs = res['segments']
     assert len(segs) == 3728
     assert _geom_hash(segs) == '913fac0a0326c33b'
+
+
+def test_nearest_segment_snaps_within_tol():
+    from real_space_filling import _nearest_segment
+    # One horizontal segment from (0,0) to (10,0).
+    seg = np.array([[[0.0, 0.0], [10.0, 0.0]]])
+    # A point just above the middle, within tolerance.
+    i, fx, fy = _nearest_segment(5.0, 1.0, seg, max_dist=2.0)
+    assert i == 0
+    assert fx == pytest.approx(5.0)
+    assert fy == pytest.approx(0.0)
+
+
+def test_nearest_segment_returns_none_outside_tol():
+    from real_space_filling import _nearest_segment
+    seg = np.array([[[0.0, 0.0], [10.0, 0.0]]])
+    i, fx, fy = _nearest_segment(5.0, 5.0, seg, max_dist=2.0)
+    assert i == -1
+    assert (fx, fy) == (5.0, 5.0)
+
+
+def test_nearest_segment_excludes_anchor_edges():
+    from real_space_filling import _nearest_segment
+    # Segment incident to the anchor (0,0) must be ignored even if nearest.
+    seg = np.array([[[0.0, 0.0], [10.0, 0.0]]])
+    i, fx, fy = _nearest_segment(5.0, 1.0, seg, max_dist=2.0,
+                                 exclude_xy=(0.0, 0.0))
+    assert i == -1
