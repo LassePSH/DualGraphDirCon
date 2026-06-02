@@ -15,7 +15,7 @@ Two init modes:
 
 Forbidden geometry (water, waterways, coastline) is fetched once via osmnx and
 cached as a GeoPackage in `data/city_water/<city>.gpkg`.
-
+s
 Geometry units throughout the public API are metres (local UTM CRS chosen by
 `osmnx.project_graph`). Defaults: `min_length=50` m, `min_angle=π/4`.
 """
@@ -41,6 +41,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from space_filling import (  # noqa: E402  reuse hot inner loops
     _connection_ok,
     _find_best,
+    _segment_blocks,
+    _min_incident_angle,
     EPS,
 )
 
@@ -342,22 +344,25 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
     capacity = max((n_init + n_block) * 4, 256)
     seg_arr = np.empty((capacity, 2, 2), dtype=np.float64)
     splittable = np.zeros(capacity, dtype=bool)
+    is_street = np.zeros(capacity, dtype=bool)
 
     for i, (a, b) in enumerate(seg_init):
         seg_arr[i, 0] = a; seg_arr[i, 1] = b
-        splittable[i] = True
+        splittable[i] = True; is_street[i] = True
     for j, (a, b) in enumerate(blocking_segs):
         k = n_init + j
         seg_arr[k, 0] = a; seg_arr[k, 1] = b
-        splittable[k] = False
+        splittable[k] = False; is_street[k] = False
     n = n_init + n_block
 
     node_keys = {}
     node_arr = np.empty((capacity * 2, 2), dtype=np.float64)
+    node_deg = np.zeros(capacity * 2, dtype=np.int64)
     n_nodes = 0
+    deg3_idx = []  # node indices whose primal degree has reached >= 3
 
     def add_node(pt):
-        nonlocal n_nodes, node_arr
+        nonlocal n_nodes, node_arr, node_deg
         k = nkey(pt)
         idx = node_keys.get(k)
         if idx is not None:
@@ -366,13 +371,24 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
             new = np.empty((node_arr.shape[0] * 2, 2), dtype=np.float64)
             new[:n_nodes] = node_arr[:n_nodes]
             node_arr = new
+            new_deg = np.zeros(node_deg.shape[0] * 2, dtype=np.int64)
+            new_deg[:n_nodes] = node_deg[:n_nodes]
+            node_deg = new_deg
         node_arr[n_nodes] = pt
         node_keys[k] = n_nodes
         n_nodes += 1
         return n_nodes - 1
 
+    def _bump(idx, amt):
+        # Degrees only ever increase in this model, so a node enters deg3_idx
+        # exactly once, when it first reaches degree 3.
+        old = int(node_deg[idx])
+        node_deg[idx] = old + amt
+        if old < 3 <= old + amt:
+            deg3_idx.append(int(idx))
+
     def grow(extra):
-        nonlocal seg_arr, splittable
+        nonlocal seg_arr, splittable, is_street
         if n + extra <= seg_arr.shape[0]:
             return
         new_cap = max(seg_arr.shape[0] * 2, n + extra)
@@ -382,11 +398,14 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
         new_s = np.zeros(new_cap, dtype=bool)
         new_s[:n] = splittable[:n]
         splittable = new_s
+        new_st = np.zeros(new_cap, dtype=bool)
+        new_st[:n] = is_street[:n]
+        is_street = new_st
 
     for a, b in seg_init:
-        add_node(a); add_node(b)
+        ia = add_node(a); ib = add_node(b); _bump(ia, 1); _bump(ib, 1)
     for a, b in blocking_segs:
-        add_node(a); add_node(b)
+        ia = add_node(a); ib = add_node(b); _bump(ia, 1); _bump(ib, 1)
 
     # area-bias centring (model 2): use mean of initial seed nodes as a proxy
     # for the network centre (works whether seeds came from spokes or roads).
@@ -448,17 +467,20 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
         # split: swap-remove the parent, append two halves (both splittable)
         grow(2)
         last_split = splittable[n - 1]
+        last_street = is_street[n - 1]
         seg_arr[seg_i] = seg_arr[n - 1]
         splittable[seg_i] = last_split
+        is_street[seg_i] = last_street
         n -= 1
         seg_arr[n, 0] = (ax, ay); seg_arr[n, 1] = (midx, midy)
-        splittable[n] = True; n += 1
+        splittable[n] = True; is_street[n] = True; n += 1
         seg_arr[n, 0] = (midx, midy); seg_arr[n, 1] = (bx, by)
-        splittable[n] = True; n += 1
+        splittable[n] = True; is_street[n] = True; n += 1
 
         m_idx = add_node((midx, midy))
         a_idx = node_keys[nkey((ax, ay))]
         b_idx = node_keys[nkey((bx, by))]
+        _bump(m_idx, 2)  # midpoint now carries the two halves
 
         if n_nodes <= 3:
             continue
@@ -509,9 +531,11 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
             grow(1)
             seg_arr[n, 0] = (midx, midy)
             seg_arr[n, 1] = best
-            splittable[n] = True
+            splittable[n] = True; is_street[n] = True
             n += 1
-            add_node(best)
+            best_idx = add_node(best)
+            _bump(m_idx, 1)        # midpoint now a T-junction (degree 3)
+            _bump(best_idx, 1)
 
     if show_progress:
         print()  # finish the in-place progress line
@@ -520,9 +544,9 @@ def _run(seg_init, blocking_segs, area_poly, *, crosses_water=None,
         print(f'  Real model {model}: {tag} at iter {last_it} with {n} segs '
               f'({n_block} blocking, {n - n_block} streets)')
 
-    # return only the splittable (street) segments; boundary stays separate
+    # return only the street segments; boundary blockers stay separate
     return [(tuple(seg_arr[i, 0]), tuple(seg_arr[i, 1]))
-            for i in range(n) if splittable[i]]
+            for i in range(n) if is_street[i]]
 
 
 def run_real_model(city: str, *, init: str = 'spokes', model: int = 1,
