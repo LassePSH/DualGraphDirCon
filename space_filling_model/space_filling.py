@@ -24,6 +24,13 @@ the fresh midpoint and a random degree>=3 junction; ``stub_splittable`` (default
 True) makes stubs first-class streets that feed back into growth, or inert
 dead-ends when False.
 
+Use ``add_noise_streets`` (or ``run_model(noise_frac=...)``) to decorate a
+finished network with random low-degree noise streets *after* growth:
+mid-block anchored cul-de-sacs (dual degree 1), T-ins (degree 2) and small
+branching trees (degree 2-3). The amount is unbounded and the backbone is
+unchanged, so one saved run can be re-decorated at many ``noise_frac`` levels
+and re-evaluated under DGDC without re-running growth.
+
 Performance: the hot inner loops (visibility, angle check) are JIT-compiled
 with numba when available; otherwise pure-numpy fallbacks are used. Use
 `run_ensemble` to run many seeds in parallel.
@@ -238,6 +245,18 @@ def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
                  existing degree>=3 intersection. Falls back to the midpoint when
                  no degree>=3 node exists yet. 1.0 = always the new midpoint,
                  0.0 = always an existing junction (when one exists).
+    noise_frac : post-growth decoration intensity: after the growth loop,
+                 add round(noise_frac * n_segments) random low-degree noise
+                 streets via `add_noise_streets` (0.0 = off; unbounded above).
+                 Runs on RNG seed `seed ^ 0xBADC0FFE`, so 0.0 is
+                 byte-identical to a run without it.
+    noise_len_max : upper bound of noise street length (default 3*min_length).
+    noise_snap_tol : distance under which a noise free end T's into a nearby
+                 street (default min_length); 0 yields only dangling
+                 degree-1 cul-de-sacs.
+    noise_branch_prob : probability a noise street anchors on a previously
+                 added noise street (default 0.3), pushing parents to dual
+                 degree 2-3.
     verbose    : print convergence / cap messages.
 
     Returns a list of segments [((x1,y1),(x2,y2)), ...].
@@ -245,8 +264,9 @@ def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
     Raises
     ------
     ValueError
-        If `p_stub` or `stub_at_midpoint_prob` is outside [0, 1], or `select`
-        is not a recognised strategy.
+        If `p_stub` or `stub_at_midpoint_prob` is outside [0, 1], if
+        `noise_frac` is negative, if `noise_branch_prob` is outside [0, 1],
+        or `select` is not a recognised strategy.
     """
     if not 0.0 <= p_stub <= 1.0:
         raise ValueError(f"p_stub must be in [0, 1], got {p_stub!r}")
