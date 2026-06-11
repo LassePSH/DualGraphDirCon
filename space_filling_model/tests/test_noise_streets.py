@@ -200,3 +200,43 @@ def test_snap_creates_t_junctions(backbone):
     snapped = add_noise_streets(backbone, noise_frac=0.5, seed=3,
                                 snap_tol=2.0 * MIN_LENGTH, branch_prob=0.0)
     assert _deg1_count(snapped) < _deg1_count(dangling)
+
+
+# --------------------------------------------------------------------------- #
+# run_model wiring                                                            #
+# --------------------------------------------------------------------------- #
+
+def test_run_model_noise_frac_zero_is_byte_identical():
+    base = run_model(model=1, seed=42, max_iter=300, verbose=False)
+    zero = run_model(model=1, seed=42, max_iter=300, verbose=False,
+                     noise_frac=0.0)
+    assert _seg_set(base) == _seg_set(zero)
+
+
+def test_run_model_noise_frac_adds_segments_deterministically():
+    base = run_model(model=1, seed=7, max_iter=300, verbose=False)
+    a = run_model(model=1, seed=7, max_iter=300, verbose=False, noise_frac=0.5)
+    b = run_model(model=1, seed=7, max_iter=300, verbose=False, noise_frac=0.5)
+    assert _seg_set(a) == _seg_set(b)
+    assert len(a) > len(base)
+
+
+def test_run_model_noise_matches_manual_decoration():
+    """run_model(noise_frac=f) == run_model() + add_noise_streets(seed^const)."""
+    base = run_model(model=1, seed=7, max_iter=300, verbose=False)
+    manual = add_noise_streets(base, noise_frac=0.5, seed=7 ^ 0xBADC0FFE)
+    wired = run_model(model=1, seed=7, max_iter=300, verbose=False,
+                      noise_frac=0.5)
+    assert _seg_set(wired) == _seg_set(manual)
+
+
+def test_run_model_negative_noise_frac_raises_early():
+    with pytest.raises(ValueError):
+        run_model(model=1, seed=1, max_iter=10, verbose=False, noise_frac=-0.5)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.5])
+def test_run_model_noise_branch_prob_out_of_range_raises(bad):
+    with pytest.raises(ValueError):
+        run_model(model=1, seed=1, max_iter=10, verbose=False,
+                  noise_frac=0.2, noise_branch_prob=bad)

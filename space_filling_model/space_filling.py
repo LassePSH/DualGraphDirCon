@@ -197,7 +197,9 @@ def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
               min_angle=np.pi / 4, max_angle=None, area_coeff=0.05,
               area_scale=1.0, select='length', select_power=1.0,
               p_stub=0.0, stub_len_max=None, snap_tol=None,
-              stub_splittable=True, stub_at_midpoint_prob=0.5, verbose=True):
+              stub_splittable=True, stub_at_midpoint_prob=0.5,
+              noise_frac=0.0, noise_len_max=None, noise_snap_tol=None,
+              noise_branch_prob=0.3, verbose=True):
     """Run the space-filling model.
 
     Parameters
@@ -252,6 +254,11 @@ def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
         raise ValueError(
             f"stub_at_midpoint_prob must be in [0, 1], got "
             f"{stub_at_midpoint_prob!r}")
+    if noise_frac < 0.0:
+        raise ValueError(f"noise_frac must be >= 0, got {noise_frac!r}")
+    if not 0.0 <= noise_branch_prob <= 1.0:
+        raise ValueError(
+            f"noise_branch_prob must be in [0, 1], got {noise_branch_prob!r}")
 
     rng = np.random.default_rng(seed)
     # Separate RNG for stubs so the main stream (segment selection and normal
@@ -476,7 +483,16 @@ def run_model(model=1, min_length=MIN_LENGTH, max_iter=200_000, seed=42,
         else:
             print(f"  Model {model}: hit max_iter={max_iter}, {n} segments")
 
-    return [(tuple(seg_arr[i, 0]), tuple(seg_arr[i, 1])) for i in range(n)]
+    segments = [(tuple(seg_arr[i, 0]), tuple(seg_arr[i, 1])) for i in range(n)]
+    if noise_frac > 0.0:
+        # Post-growth decoration on its own RNG stream: noise_frac=0.0 is
+        # byte-identical to a run without it.
+        segments = add_noise_streets(
+            segments, noise_frac=noise_frac, seed=seed ^ 0xBADC0FFE,
+            min_length=min_length, noise_len_max=noise_len_max,
+            snap_tol=noise_snap_tol, branch_prob=noise_branch_prob,
+            min_angle=min_angle, verbose=verbose)
+    return segments
 
 
 def _find_best(mx, my, candidates, idxs, seg_arr, model, min_angle,
