@@ -18,8 +18,8 @@ print("Running real space-filling model and plotting results...")
 # shoulder of the dual-graph degree distribution. Sweep it (e.g. 0.0, 0.3,
 # 0.6, 0.9) and re-run to see the shoulder rise; lower snap_tol (e.g. 1.0) for
 # more degree-1 cul-de-sacs instead of degree-2 T-ins.
-P_STUB = 0.3
-res = run_circular_model(area_m2=np.pi*5000**2, area_coeff = 1_000, model=2, min_length=50.0, seed=42, p_stub=P_STUB)
+P_STUB = 3
+res = run_circular_model(area_m2=np.pi*20e3**2, max_iter=int(67e6), area_coeff=0, model=2, min_length=50.0, seed=42, p_stub=P_STUB)
 gdf = to_geodataframe(res, model_id=2)
 
 # Per-segment degree: the higher of its two endpoint degrees. This highlights

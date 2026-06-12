@@ -18,7 +18,7 @@ python cities/regime.py
 # Run space-filling model (generates model1.shp and model2.shp)
 cd space_filling_model && python space_filling.py
 
-# Real-area space-filling model (domain = convex hull of a cached city, water excluded)
+# Real-area space-filling model (circular domain sized to a cached city's area)
 cd space_filling_model && python real_space_filling.py
 
 # Pre-download OSM graphs to data/city_graphs/ (cached as .graphml)
@@ -86,12 +86,20 @@ gdf = get_geodataframe(model=1, seed=42)
 
 ### `space_filling_model/real_space_filling.py` — Real-Area Space-Filling Model
 
-Wraps `space_filling.run_model` but runs it at real city size: the unit-square
-domain is replaced by the convex hull of a cached OSM city graph in local UTM
-metres. Two init modes: `"spokes"` (boundary + N lines from the centroid) and
-`"roads"` (boundary + major roads — primary/trunk/secondary — pulled from the
-real graph). Geometry is in metres throughout (defaults `min_length=50` m,
-`min_angle=π/4`).
+Wraps `space_filling.run_model` but runs it at real city size on a **circular**
+domain: the unit-square is replaced by a circle whose area matches the
+convex-hull area of a cached OSM city graph (pass `city=`) or an explicit
+`area_m2=`. Init is `"spokes"` (boundary + N lines from the centre). Geometry is
+in metres throughout (defaults `min_length=50` m, `min_angle=π/4`). The returned
+GeoDataFrame is always georeferenced: the city's local UTM CRS when a `city` is
+given, an explicit `crs=` if passed, otherwise `EPSG:32632` (UTM 32N). No water
+masking — the domain is a plain circle.
+
+```python
+from space_filling_model.real_space_filling import run_circular_model, to_geodataframe
+res = run_circular_model(area_m2=np.pi * 500**2, model=2, min_length=50.0, seed=42)
+gdf = to_geodataframe(res, model_id=2)
+```
 
 ### `sierpinski_carpet_model/sierpinski_carpet.py` — Synthetic Fractal Network
 
