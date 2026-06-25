@@ -1,0 +1,5 @@
+  Model 2: converged at iteration 5712 with 10625 segments
+model 2 seed 42: 10625 segments (2409s)
+  m2_s42_nf0: 3283 streets, kmax=293 (10s)
+  m2_s42_nf0.5: 7712 streets, kmax=472 (779s)
+  m2_s42_nf1: 11842 streets, kmax=576 (2271s)
