@@ -95,3 +95,43 @@ Ljubljana, Slovenia
 Baku, Azerbaijan
 Minsk, Belarus
 Montevideo, Uruguay
+Canberra, Australia
+Brasília, Brazil
+New Delhi, India
+Karlsruhe, Germany
+Adelaide, Australia
+Chandigarh, India
+La Plata, Argentina
+Palmanova, Italy
+Marrakesh, Morocco
+Fez, Morocco
+Tunis, Tunisia
+Isfahan, Iran
+Kathmandu, Nepal
+Medellín, Colombia
+Mumbai, India
+Kampala, Uganda
+Lahore, Pakistan
+Kigali, Rwanda
+Chicago, Illinois, USA
+Manhattan, New York, USA
+Salt Lake City, Utah, USA
+Melbourne, Australia
+Turin, Italy
+Savannah, Georgia, USA
+Beijing, China
+Johannesburg, South Africa
+Dakar, Senegal
+Dar es Salaam, Tanzania
+Cape Town, South Africa
+Tashkent, Uzbekistan
+Almaty, Kazakhstan
+Samarkand, Uzbekistan
+Colombo, Sri Lanka
+Auckland, New Zealand
+Quito, Ecuador
+Guatemala City, Guatemala
+Tehran, Iran
+Chengdu, China
+Istanbul, Turkey
+Kolkata, India

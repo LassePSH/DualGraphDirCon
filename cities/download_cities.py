@@ -44,7 +44,15 @@ def download_city(city):
         if city.strip().lower().startswith('copenhagen'):
             G = _download_copenhagen()
         else:
-            G = ox.graph.graph_from_place(city)
+            try:
+                G = ox.graph.graph_from_place(city)
+            except Exception:
+                # Default which_result=None queries with limit=50 and auto-picks
+                # the first polygon; for some names (e.g. Canberra, Mumbai,
+                # Lahore, Johannesburg, Cape Town) Nominatim returns a node
+                # first and this raises. which_result=1 (limit=1) returns the
+                # city's boundary polygon cleanly.
+                G = ox.graph.graph_from_place(city, which_result=1)
         ox.save_graphml(G, path)
         print(f'{city} downloaded and saved')
     except Exception as e:
