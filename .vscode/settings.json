@@ -1,0 +1,10 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.workspaceSearchPaths": [
+        ".venv",
+        "*/.venv",
+        "*/.conda/envs/"
+    ],
+    "python-envs.pythonProjects": []
+}

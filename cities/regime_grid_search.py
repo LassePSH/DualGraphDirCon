@@ -59,9 +59,9 @@ if __name__ == '__main__':
                 else: 
                     path = f'/home/lpsha/s154446/fractality/data/city_degrees/t{int(t_buf)}_a{int(a_thresh)}_no_simplify/'
 
-                if os.path.exists(path):
-                    print(f't={t_buf} a={a_thresh}: exist, skipping folder')
-                    continue
+                # if os.path.exists(path):
+                #     print(f't={t_buf} a={a_thresh}: exist, skipping folder')
+                #     continue
 
                 os.makedirs(path, exist_ok=True)
                 print(f't={t_buf} a={a_thresh} simplify={int(s)}:  running...')

@@ -21,6 +21,12 @@ cd space_filling_model && python space_filling.py
 # Real-area space-filling model (circular domain sized to a cached city's area)
 cd space_filling_model && python real_space_filling.py
 
+# Real space-filling + DGDC degree plots (sweeps p_stub; writes to plots/)
+cd space_filling_model && python plot_real_space_filling.py
+
+# Run DGDC on a whole-country OSM .osm.pbf extract (Denmark) and plot degrees
+python DK_plot/dgdc_denmark.py            # add --bbox / --tag / --reuse for quick iterations
+
 # Pre-download OSM graphs to data/city_graphs/ (cached as .graphml)
 python cities/download_cities.py
 
@@ -43,7 +49,21 @@ python city_orientation/compute_orientations.py --processes 20
 python mobility/match_sensible.py
 ```
 
-No automated test suite or linter is configured. Research is done via Jupyter notebooks in `notebooks_lasse/`.
+No linter is configured. The space-filling model has a `pytest` suite in
+`space_filling_model/tests/` (segment selection, low-degree noise, and stub
+noise). Run the fast unit-square suites only — `test_stub_noise.py` exercises
+the full real-area model and takes tens of minutes:
+
+```bash
+# fast: unit-square model tests
+pytest space_filling_model/tests/test_unit_square_stub_noise.py \
+       space_filling_model/tests/test_noise_streets.py \
+       space_filling_model/tests/test_segment_selection.py
+```
+
+Research is otherwise done via Jupyter notebooks in `notebooks_lasse/`. Design
+specs and implementation plans for model features live in `docs/superpowers/`
+(`specs/` and `plans/`).
 
 ## Architecture
 
@@ -78,9 +98,14 @@ Iterative subdivision model that produces fractal-like street networks:
 
 Uses `cKDTree` for nearest-neighbor lookups and NumPy-vectorized geometry checks for performance. Dynamic array allocation with doubling capacity.
 
+`run_model` also takes:
+- `select` — segment-selection strategy (default `'length'`, length-proportional).
+- `noise_frac` — post-growth decoration: after growth, add `round(noise_frac * n_segments)` random low-degree "noise" streets via `add_noise_streets` (0.0 = off). Noise streets are added *after* growth so nothing builds on them, keeping their dual-graph degree low (they populate the `k ≤ ~2` shoulder of the degree distribution). Tuned by `noise_len_max`, `noise_snap_tol`, and `noise_branch_prob`. Because decoration runs on its own RNG stream, one saved backbone can be re-decorated at many `noise_frac` levels without re-growing.
+
 ```python
-from space_filling_model.space_filling import run_model, get_geodataframe
+from space_filling_model.space_filling import run_model, get_geodataframe, add_noise_streets
 segs = run_model(model=2, seed=42, min_angle=np.pi/4)
+segs = run_model(model=2, seed=42, noise_frac=0.5)   # grow, then decorate
 gdf = get_geodataframe(model=1, seed=42)
 ```
 
@@ -95,9 +120,18 @@ GeoDataFrame is always georeferenced: the city's local UTM CRS when a `city` is
 given, an explicit `crs=` if passed, otherwise `EPSG:32632` (UTM 32N). No water
 masking — the domain is a plain circle.
 
+Set `p_stub` (default `0.0`) to inject random dead-end stubs that populate the
+low-degree shoulder of the dual-graph degree distribution: at each growth step,
+with probability `p_stub` a short stub is emitted from the split point instead
+of a normal connection. `stub_len_max` (default `3*min_length`) bounds stub
+length; `snap_tol` (default `min_length`) is the T-in distance — a small
+`snap_tol` yields mostly degree-1 cul-de-sacs, the default yields degree-2
+T-ins. Stubs draw from a separate RNG so the non-stub backbone is unchanged.
+`plot_real_space_filling.py` sweeps `p_stub` and runs DGDC on the output.
+
 ```python
 from space_filling_model.real_space_filling import run_circular_model, to_geodataframe
-res = run_circular_model(area_m2=np.pi * 500**2, model=2, min_length=50.0, seed=42)
+res = run_circular_model(area_m2=np.pi * 500**2, model=2, min_length=50.0, seed=42, p_stub=0.3)
 gdf = to_geodataframe(res, model_id=2)
 ```
 
@@ -148,7 +182,16 @@ street segment via a `shapely.STRtree` nearest-neighbour query, attaching each
 point's segment id, dual-graph `degree`, and `osmid`. Splits points into
 moving (`label == -1`) and stop (infostop) sets and writes
 `moving_segments.csv` / `stops_segments.csv`. `sensible.ipynb` explores the
-result.
+result. (`mobility/` is gitignored — local data only.)
+
+### `DK_plot/dgdc_denmark.py` — Whole-Country DGDC
+
+Runs DGDC on a raw OpenStreetMap `.osm.pbf` country extract (Denmark). `pyrosm`
+reads the PBF into an osmnx-compatible graph, which is fed to
+`dgdc.get_dual_dir_con`, then the dual-graph degrees are plotted. Both expensive
+steps are cached next to the script: the converted graph as `.graphml` and the
+DGDC result as GeoParquet. CLI: `--bbox minx miny maxx maxy` + `--tag` for a
+quick sub-region, `--reuse` to redo only the figure from a cached DGDC result.
 
 ### Output directories
 
@@ -164,3 +207,4 @@ result.
 | `shapely` | Geometric operations (LineString intersections, angles) |
 | `scipy.spatial.cKDTree` | Spatial nearest-neighbor lookups |
 | `geopandas` | Spatial DataFrames for results |
+| `pyrosm` | Read raw `.osm.pbf` country extracts (`DK_plot/`) |
